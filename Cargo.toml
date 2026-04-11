@@ -1,0 +1,25 @@
+[package]
+name = "librarian-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "Give Claude a librarian for your markdown vault"
+authors = ["Neal Meyer"]
+license = "MIT"
+repository = "https://github.com/nealme/librarian-mcp"
+homepage = "https://github.com/nealme/librarian-mcp"
+
+[[bin]]
+name = "librarian-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { version = "1", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+ignore = "0.4"
+regex = "1"
+chrono = "0.4"
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
