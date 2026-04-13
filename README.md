@@ -70,7 +70,7 @@ LIBRARIAN_VAULTS=/vault/one:/vault/two # Multiple vaults (colon-separated)
 
 ## Tools
 
-Librarian exposes 14 tools to Claude:
+Librarian exposes 17 tools to Claude:
 
 | Tool | Description |
 |------|-------------|
@@ -88,6 +88,25 @@ Librarian exposes 14 tools to Claude:
 | `library_shortest_path` | Find the shortest link chain between two notes |
 | `library_graph_analysis` | Connected components, hub notes, bridges, orphans |
 | `library_import` | Convert PDF, DOCX, images, etc. to markdown via MarkItDown |
+| `library_cluster` | Detect topic communities using Louvain modularity optimization |
+| `library_visualize` | Generate interactive HTML graph visualization (D3.js) |
+| `library_report` | Comprehensive vault analysis: god nodes, communities, bridges |
+
+## Example: Research Skill Graph
+
+The `examples/research-skill-graph/` directory contains a 16-file interconnected vault that demonstrates multi-lens research analysis. It uses 6 analytical lenses (technical, economic, historical, geopolitical, contrarian, first-principles) to force the AI through fundamentally different perspectives on any topic.
+
+```bash
+librarian-mcp --setup examples/research-skill-graph
+```
+
+Then in Claude Code:
+```
+Follow the execution instructions in index.md.
+Research: "Why are prediction market edges compressing?"
+```
+
+The vault includes methodology files (source evaluation, synthesis rules, contradiction protocol), lens templates, and a knowledge layer that compounds across research projects.
 
 ## Features
 
