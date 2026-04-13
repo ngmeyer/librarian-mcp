@@ -23,3 +23,8 @@ regex = "1"
 chrono = "0.4"
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
