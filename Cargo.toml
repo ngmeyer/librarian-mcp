@@ -7,6 +7,9 @@ authors = ["Neal Meyer"]
 license = "MIT"
 repository = "https://github.com/ngmeyer/librarian-mcp"
 homepage = "https://github.com/ngmeyer/librarian-mcp"
+readme = "README.md"
+keywords = ["mcp", "obsidian", "markdown", "knowledge-graph", "claude"]
+categories = ["command-line-utilities", "text-processing"]
 
 [[bin]]
 name = "librarian-mcp"

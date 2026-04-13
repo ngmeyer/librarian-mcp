@@ -8,9 +8,26 @@
 
 Give Claude a librarian for your markdown vault.
 
-Librarian is an MCP server that connects [Claude](https://claude.ai) to your [Obsidian](https://obsidian.md) vault or any folder of markdown files. Search your notes, auto-link mentions as wikilinks, explore backlinks and tags, import documents — all from inside Claude.
+Librarian is an MCP server that connects [Claude](https://claude.ai) to your [Obsidian](https://obsidian.md) vault or any folder of markdown files. Search your notes, auto-link mentions as wikilinks, explore backlinks and tags, detect topic communities, and visualize your knowledge graph — all from inside Claude.
 
-Inspired by [Karpathy's wiki-as-memory](https://x.com/karpathy) approach: use a knowledge base as persistent, structured memory for Claude instead of ephemeral conversation context.
+> **Runs entirely locally.** Your vault data never leaves your machine. Librarian reads and writes files on disk and communicates with Claude over stdio. No network calls, no telemetry, no cloud storage.
+
+## Quick Start
+
+```bash
+# 1. Install
+brew install ngmeyer/tap/librarian-mcp
+
+# 2. Point at your vault and auto-configure Claude
+librarian-mcp --setup ~/my-vault
+
+# 3. Restart Claude, then try:
+#    /librarian analyze     — see your vault's knowledge graph
+#    /librarian search      — find anything across all notes
+#    /librarian status      — vault health overview
+```
+
+`--setup` writes the MCP server config into Claude Desktop and Claude Code (with backups), and installs the `/librarian` skill so you get 12 slash commands out of the box.
 
 ## Install
 
@@ -22,23 +39,38 @@ brew install ngmeyer/tap/librarian-mcp
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/ngmeyer/librarian-mcp/releases) for macOS (arm64/x86_64), Linux, and Windows.
+Download from [GitHub Releases](https://github.com/ngmeyer/librarian-mcp/releases) for macOS (arm64/x86_64), Linux (arm64/x86_64), and Windows. Place the binary on your PATH.
 
-### Build from source
+### Build from source (requires Rust)
 
 ```bash
-cargo install --git https://github.com/ngmeyer/librarian-mcp --bin librarian-mcp
+cargo install --git https://github.com/ngmeyer/librarian-mcp
 ```
 
-## Setup
+## How It Works
 
-Point Librarian at your vault and auto-configure Claude:
+Librarian is a **standalone binary** — it works directly on your markdown files. Obsidian does not need to be running (and they can run simultaneously without conflict). Claude connects via the [Model Context Protocol](https://modelcontextprotocol.io) over stdio.
+
+### How is this different from...
+
+| | Read files directly | Obsidian Copilot | mcp-obsidian | **Librarian** |
+|---|---|---|---|---|
+| Trigram-indexed search | No | Plugin | Plugin | **Yes** |
+| Auto-wikilinks on write | No | No | No | **Yes** |
+| Knowledge graph traversal | No | No | Partial | **Yes (BFS, shortest path)** |
+| Community detection | No | No | No | **Yes (Louvain)** |
+| Interactive graph viz | No | No | No | **Yes (D3.js)** |
+| Works without Obsidian | Yes | No | No | **Yes** |
+| Works in Claude Code | Yes (manual) | No | No | **Yes** |
+| Standalone binary | N/A | No | No | **Yes** |
+
+## Setup
 
 ```bash
 librarian-mcp --setup ~/my-vault
 ```
 
-This writes the MCP server entry into Claude Desktop and Claude Code configs (with backups). Restart Claude to connect.
+This auto-configures Claude Desktop and Claude Code (with backups of existing configs). Restart Claude to connect.
 
 ### Multiple vaults
 
@@ -65,7 +97,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 
 ```bash
 LIBRARIAN_VAULT=/path/to/vault        # Single vault
-LIBRARIAN_VAULTS=/vault/one:/vault/two # Multiple vaults (colon-separated)
+LIBRARIAN_VAULTS=/vault/one:/vault/two # Multiple vaults (colon-separated, Unix only)
 ```
 
 ## Tools
@@ -76,7 +108,7 @@ Librarian exposes 17 tools to Claude:
 |------|-------------|
 | `library_search` | Full-text search across all vault files (trigram-indexed) |
 | `library_read` | Read a file by relative path |
-| `library_write` | Write a file with auto-wikilink detection for Obsidian graph compatibility |
+| `library_write` | Write a file with auto-wikilink detection |
 | `library_list` | List files and directories (shows vault roots when multi-vault) |
 | `library_links` | Get backlinks and outgoing wikilinks for a file |
 | `library_tags` | List all #tags with counts, optionally filtered by prefix |
@@ -87,34 +119,55 @@ Librarian exposes 17 tools to Claude:
 | `library_traverse` | BFS traversal from a note — explore the topic neighborhood N hops deep |
 | `library_shortest_path` | Find the shortest link chain between two notes |
 | `library_graph_analysis` | Connected components, hub notes, bridges, orphans |
-| `library_import` | Convert PDF, DOCX, images, etc. to markdown via MarkItDown |
+| `library_import` | Convert PDF, DOCX, images, etc. to markdown (requires [MarkItDown](https://github.com/microsoft/markitdown)) |
 | `library_cluster` | Detect topic communities using Louvain modularity optimization |
 | `library_visualize` | Generate interactive HTML graph visualization (D3.js) |
 | `library_report` | Comprehensive vault analysis: god nodes, communities, bridges |
 
+## The /librarian Skill
+
+`--setup` installs a Claude Code skill that gives you 12 high-level commands built on the tools above:
+
+| Command | What it does |
+|---------|-------------|
+| `/librarian search <query>` | Deep search with synthesis across top results |
+| `/librarian analyze` | Full vault analysis — communities, hubs, visualization |
+| `/librarian graph [note]` | Explore a note's neighborhood or vault-wide structure |
+| `/librarian connect [path]` | Find and apply missing wikilinks |
+| `/librarian daily [text]` | Append to today's daily note |
+| `/librarian status` | Quick vault health check |
+| `/librarian ingest [path]` | Import a local markdown file into the vault |
+| `/librarian import <file>` | Convert PDF/DOCX/images to vault markdown |
+| `/librarian from web <url>` | Import a web page as a vault note |
+| `/librarian from twitter <url>` | Import an X/Twitter thread |
+| `/librarian from gmail <query>` | Import Gmail threads |
+| `/librarian from calendar` | Import calendar events |
+
 ## Example: Research Skill Graph
 
-The `examples/research-skill-graph/` directory contains a 16-file interconnected vault that demonstrates multi-lens research analysis. It uses 6 analytical lenses (technical, economic, historical, geopolitical, contrarian, first-principles) to force the AI through fundamentally different perspectives on any topic.
+The repo includes a 16-file example vault demonstrating multi-lens research analysis — 6 analytical lenses that force different perspectives on any topic.
+
+To try it after cloning:
 
 ```bash
+git clone https://github.com/ngmeyer/librarian-mcp
+cd librarian-mcp
 librarian-mcp --setup examples/research-skill-graph
 ```
 
-Then in Claude Code:
-```
-Follow the execution instructions in index.md.
-Research: "Why are prediction market edges compressing?"
-```
+Then in Claude Code: "Follow the execution instructions in index.md. Research: Why are prediction market edges compressing?"
 
-The vault includes methodology files (source evaluation, synthesis rules, contradiction protocol), lens templates, and a knowledge layer that compounds across research projects.
+The vault includes source evaluation (5-tier trust system), contradiction protocol, synthesis rules, and a knowledge layer that compounds across projects. See [`examples/research-skill-graph/index.md`](examples/research-skill-graph/index.md) for the full system.
 
 ## Features
 
 ### Auto-linking
 
-When writing files, Librarian scans for mentions of existing note titles and wraps them in `[[wikilinks]]`. Links use canonical file names so they resolve correctly in Obsidian's graph view — even on case-sensitive filesystems.
+When Claude writes files via `library_write`, Librarian scans for mentions of existing note titles and wraps them in `[[wikilinks]]`. This happens **only on explicit writes** — Librarian never modifies files you didn't ask it to write.
 
-Frontmatter aliases are supported: if a note has `aliases: [ML, machine learning]`, mentions of "ML" or "machine learning" in other notes will auto-link to it using `[[Note Name|ML]]` format.
+Links use canonical file names so they resolve correctly in Obsidian's graph view, even on case-sensitive filesystems. Frontmatter aliases are supported: if a note has `aliases: [ML, machine learning]`, mentions will auto-link using `[[Note Name|ML]]` format.
+
+Auto-linking skips code blocks, inline code, URLs, and existing wikilinks to avoid corrupting content.
 
 ### Knowledge graph traversal
 
@@ -124,9 +177,13 @@ Librarian builds a bidirectional graph from your vault's `[[wikilinks]]` and exp
 - **Shortest path** — Find the link chain between two notes. "How are these ideas connected?"
 - **Graph analysis** — Connected components, hub notes, bridge notes, orphans. "What's the structure of my vault?"
 
+### Community detection
+
+Louvain modularity optimization identifies topic clusters in your vault. Combined with betweenness centrality and PageRank, the report tool ranks "god nodes" (structurally important notes) and finds surprising cross-community connections.
+
 ### Search
 
-Search is backed by an in-memory trigram index built on startup. Fast enough for vaults with 10,000+ files.
+Search is backed by an in-memory trigram index built on startup. Handles vaults with 10,000+ files.
 
 ### Exclusion patterns
 
@@ -134,15 +191,13 @@ By default, Librarian skips `.obsidian/`, `.trash/`, `.git/`, and `node_modules/
 
 ```gitignore
 # .librarianignore
-.obsidian/
-.trash/
 templates/
 private/
 ```
 
 ## Obsidian compatibility
 
-Librarian is designed to work seamlessly with Obsidian vaults:
+Librarian works seamlessly alongside Obsidian — both can be open at the same time:
 
 - Reads and writes standard `[[wikilinks]]` and `[[note|display text]]`
 - Respects YAML frontmatter and `aliases`

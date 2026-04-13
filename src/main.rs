@@ -50,12 +50,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vaults.split(':').map(PathBuf::from).collect()
     } else if let Ok(vault) = std::env::var("LIBRARIAN_VAULT") {
         vec![PathBuf::from(vault)]
+    } else if cli.setup {
+        eprintln!("Error: --setup requires at least one vault path.");
+        eprintln!("Usage: librarian-mcp --setup /path/to/vault");
+        std::process::exit(1);
     } else {
-        eprintln!("No vault specified. Usage: librarian-mcp /path/to/vault");
-        let default = dirs::home_dir()
-            .map(|h| h.join("vault"))
-            .unwrap_or_else(|| PathBuf::from("."));
-        vec![default]
+        eprintln!("Error: no vault specified.");
+        eprintln!("Usage: librarian-mcp /path/to/vault");
+        eprintln!("       librarian-mcp --setup /path/to/vault");
+        std::process::exit(1);
     };
 
     // Handle --setup
