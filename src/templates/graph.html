@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{VAULT_NAME}} — Knowledge Graph</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1b26; color: #c0caf5; height: 100vh; overflow: hidden; }
+#controls { position: fixed; top: 0; left: 0; right: 0; z-index: 10; background: #1a1b26; border-bottom: 1px solid #3b4261; padding: 12px 20px; display: flex; align-items: center; gap: 16px; }
+#controls h1 { font-size: 16px; font-weight: 600; color: #7aa2f7; white-space: nowrap; }
+#search { background: #24283b; border: 1px solid #3b4261; color: #c0caf5; padding: 6px 12px; border-radius: 6px; font-size: 14px; width: 280px; }
+#search::placeholder { color: #565f89; }
+#search:focus { outline: none; border-color: #7aa2f7; }
+#info { font-size: 13px; color: #565f89; margin-left: auto; }
+#legend { display: flex; gap: 8px; flex-wrap: wrap; }
+.legend-item { font-size: 11px; padding: 2px 8px; border-radius: 10px; cursor: pointer; opacity: 0.8; }
+.legend-item:hover { opacity: 1; }
+#graph { width: 100%; height: 100%; padding-top: 52px; }
+#tooltip { position: fixed; background: #24283b; border: 1px solid #3b4261; padding: 10px 14px; border-radius: 8px; font-size: 13px; pointer-events: none; display: none; z-index: 20; max-width: 300px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+#tooltip .name { font-weight: 600; color: #7aa2f7; margin-bottom: 4px; }
+#tooltip .detail { color: #9aa5ce; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <h1>{{VAULT_NAME}}</h1>
+  <input type="text" id="search" placeholder="Search notes...">
+  <div id="legend"></div>
+  <div id="info"></div>
+</div>
+<div id="graph"></div>
+<div id="tooltip"><div class="name"></div><div class="detail"></div></div>
+
+<script>
+// Graph data injected by librarian
+const graphNodes = {{GRAPH_NODES}};
+const graphEdges = {{GRAPH_EDGES}};
+const clusterColors = {{CLUSTER_COLORS}};
+const clusterLabels = {{CLUSTER_LABELS}};
+
+// Simple force-directed layout
+const canvas = document.createElement('canvas');
+const container = document.getElementById('graph');
+canvas.width = container.clientWidth;
+canvas.height = container.clientHeight;
+container.appendChild(canvas);
+const ctx = canvas.getContext('2d');
+
+// Initialize node positions randomly
+const nodes = graphNodes.map(n => ({
+  ...n,
+  x: Math.random() * canvas.width,
+  y: Math.random() * canvas.height + 52,
+  vx: 0, vy: 0,
+}));
+const nodeMap = {};
+nodes.forEach(n => nodeMap[n.id] = n);
+
+const edges = graphEdges.filter(e => nodeMap[e.from] && nodeMap[e.to]);
+
+// Build legend
+const legend = document.getElementById('legend');
+const seenClusters = new Set();
+nodes.forEach(n => seenClusters.add(n.group));
+[...seenClusters].sort((a,b) => a-b).forEach(c => {
+  const item = document.createElement('span');
+  item.className = 'legend-item';
+  item.style.background = clusterColors[c] || '#565f89';
+  item.style.color = '#1a1b26';
+  item.textContent = clusterLabels[c] || `Cluster ${c}`;
+  legend.appendChild(item);
+});
+
+document.getElementById('info').textContent = `${nodes.length} notes, ${edges.length} links`;
+
+// Force simulation
+function simulate() {
+  const repulsion = 800;
+  const attraction = 0.005;
+  const damping = 0.9;
+  const centerX = canvas.width / 2;
+  const centerY = canvas.height / 2 + 26;
+
+  // Repulsion
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const dx = nodes[j].x - nodes[i].x;
+      const dy = nodes[j].y - nodes[i].y;
+      const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      const force = repulsion / (dist * dist);
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      nodes[i].vx -= fx; nodes[i].vy -= fy;
+      nodes[j].vx += fx; nodes[j].vy += fy;
+    }
+  }
+
+  // Attraction along edges
+  edges.forEach(e => {
+    const a = nodeMap[e.from], b = nodeMap[e.to];
+    if (!a || !b) return;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+    const force = dist * attraction;
+    const fx = (dx / dist) * force;
+    const fy = (dy / dist) * force;
+    a.vx += fx; a.vy += fy;
+    b.vx -= fx; b.vy -= fy;
+  });
+
+  // Center gravity
+  nodes.forEach(n => {
+    n.vx += (centerX - n.x) * 0.001;
+    n.vy += (centerY - n.y) * 0.001;
+    n.vx *= damping; n.vy *= damping;
+    n.x += n.vx; n.y += n.vy;
+    n.x = Math.max(20, Math.min(canvas.width - 20, n.x));
+    n.y = Math.max(72, Math.min(canvas.height - 20, n.y));
+  });
+}
+
+// Rendering
+let hoveredNode = null;
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Edges
+  ctx.lineWidth = 0.5;
+  ctx.strokeStyle = '#3b4261';
+  edges.forEach(e => {
+    const a = nodeMap[e.from], b = nodeMap[e.to];
+    if (!a || !b) return;
+    if (hoveredNode && (hoveredNode.id === e.from || hoveredNode.id === e.to)) {
+      ctx.strokeStyle = '#7aa2f7';
+      ctx.lineWidth = 1.5;
+    } else {
+      ctx.strokeStyle = '#3b4261';
+      ctx.lineWidth = 0.5;
+    }
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  });
+
+  // Nodes
+  nodes.forEach(n => {
+    const radius = 3 + (n.size || 0) * 8;
+    const color = clusterColors[n.group] || '#565f89';
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = (hoveredNode === n) ? '#ffffff' : color;
+    ctx.fill();
+    if (n.size > 0.5) {
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.fillStyle = '#c0caf5';
+      ctx.textAlign = 'center';
+      ctx.fillText(n.label, n.x, n.y - radius - 4);
+    }
+  });
+
+  if (hoveredNode) {
+    ctx.font = 'bold 13px -apple-system, sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.fillText(hoveredNode.label, hoveredNode.x, hoveredNode.y - (3 + (hoveredNode.size||0)*8) - 6);
+  }
+}
+
+// Interaction
+const tooltip = document.getElementById('tooltip');
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  hoveredNode = null;
+  for (const n of nodes) {
+    const r = 3 + (n.size||0) * 8 + 4;
+    if ((mx-n.x)**2 + (my-n.y)**2 < r*r) {
+      hoveredNode = n;
+      break;
+    }
+  }
+  if (hoveredNode) {
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX + 12) + 'px';
+    tooltip.style.top = (e.clientY + 12) + 'px';
+    tooltip.querySelector('.name').textContent = hoveredNode.label;
+    const cluster = clusterLabels[hoveredNode.group] || `Cluster ${hoveredNode.group}`;
+    tooltip.querySelector('.detail').innerHTML =
+      `Community: ${cluster}<br>` +
+      `Importance: ${(hoveredNode.size * 100).toFixed(0)}%<br>` +
+      `Connections: ${hoveredNode.degree || 0}`;
+    canvas.style.cursor = 'pointer';
+  } else {
+    tooltip.style.display = 'none';
+    canvas.style.cursor = 'default';
+  }
+});
+
+// Search
+const searchInput = document.getElementById('search');
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.toLowerCase();
+  if (!q) { nodes.forEach(n => n._dim = false); return; }
+  nodes.forEach(n => { n._dim = !n.label.toLowerCase().includes(q); });
+});
+
+// Animation loop
+let frame = 0;
+function loop() {
+  if (frame < 300) simulate();
+  draw();
+  frame++;
+  requestAnimationFrame(loop);
+}
+loop();
+
+// Resize
+window.addEventListener('resize', () => {
+  canvas.width = container.clientWidth;
+  canvas.height = container.clientHeight;
+});
+</script>
+</body>
+</html>

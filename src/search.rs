@@ -1,0 +1,251 @@
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+#[derive(Default)]
+pub struct SearchIndex {
+    /// All indexed files: (absolute path, content)
+    pub files: Vec<(PathBuf, String)>,
+    /// Trigram -> indices into `files`
+    trigrams: HashMap<[u8; 3], Vec<usize>>,
+    /// BM25: word count per file
+    pub doc_lengths: Vec<usize>,
+    /// BM25: average document length across vault
+    pub avg_doc_length: f64,
+    /// BM25: word -> number of docs containing it
+    pub doc_freq: HashMap<String, usize>,
+    /// BM25: total number of documents
+    pub total_docs: usize,
+}
+
+impl SearchIndex {
+    pub fn build(paths: &[(PathBuf, String)]) -> Self {
+        let mut idx = SearchIndex {
+            files: paths.to_vec(),
+            trigrams: HashMap::new(),
+            doc_lengths: Vec::with_capacity(paths.len()),
+            avg_doc_length: 0.0,
+            doc_freq: HashMap::new(),
+            total_docs: paths.len(),
+        };
+
+        // Build trigrams and BM25 stats in one pass
+        for (i, (_path, content)) in paths.iter().enumerate() {
+            let lower = content.to_lowercase();
+
+            // Trigrams
+            let bytes = lower.as_bytes();
+            for window in bytes.windows(3) {
+                let tri = [window[0], window[1], window[2]];
+                idx.trigrams.entry(tri).or_default().push(i);
+            }
+
+            // BM25: doc length
+            let word_count = content.split_whitespace().count();
+            idx.doc_lengths.push(word_count);
+
+            // BM25: doc_freq (unique lowercased words per doc)
+            let unique_words: HashSet<&str> = lower.split_whitespace().collect();
+            for word in unique_words {
+                *idx.doc_freq.entry(word.to_string()).or_insert(0) += 1;
+            }
+        }
+
+        for indices in idx.trigrams.values_mut() {
+            indices.sort_unstable();
+            indices.dedup();
+        }
+
+        // BM25: average doc length
+        if !idx.doc_lengths.is_empty() {
+            let total: usize = idx.doc_lengths.iter().sum();
+            idx.avg_doc_length = total as f64 / idx.doc_lengths.len() as f64;
+        }
+
+        idx
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> Vec<(PathBuf, String, f64)> {
+        let query_lower = query.to_lowercase();
+        let query_bytes = query_lower.as_bytes();
+
+        // Collect candidate indices that match the query string
+        let matched_indices: Vec<usize> = if query_bytes.len() < 3 {
+            self.files.iter()
+                .enumerate()
+                .filter(|(_, (_, content))| content.to_lowercase().contains(&query_lower))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            let mut candidate_sets: Vec<&Vec<usize>> = Vec::new();
+            for window in query_bytes.windows(3) {
+                let tri = [window[0], window[1], window[2]];
+                match self.trigrams.get(&tri) {
+                    Some(indices) => candidate_sets.push(indices),
+                    None => return Vec::new(),
+                }
+            }
+
+            if candidate_sets.is_empty() {
+                return Vec::new();
+            }
+
+            let mut candidates: HashSet<usize> = candidate_sets[0].iter().copied().collect();
+            for set in &candidate_sets[1..] {
+                let other: HashSet<usize> = set.iter().copied().collect();
+                candidates = candidates.intersection(&other).copied().collect();
+            }
+
+            candidates.into_iter()
+                .filter(|&i| {
+                    let (_, content) = &self.files[i];
+                    content.to_lowercase().contains(&query_lower)
+                })
+                .collect()
+        };
+
+        // BM25 scoring
+        let k1: f64 = 1.2;
+        let b: f64 = 0.75;
+        let n = self.total_docs as f64;
+        let avgdl = self.avg_doc_length;
+        let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+
+        let mut scored: Vec<(PathBuf, String, f64)> = matched_indices.into_iter()
+            .map(|i| {
+                let (path, content) = &self.files[i];
+                let doc_len = self.doc_lengths.get(i).copied().unwrap_or(0) as f64;
+                let content_lower = content.to_lowercase();
+                let doc_words: Vec<&str> = content_lower.split_whitespace().collect();
+
+                let mut score = 0.0f64;
+                for term in &query_terms {
+                    let tf = doc_words.iter().filter(|w| *w == term).count() as f64;
+                    let df = self.doc_freq.get(*term).copied().unwrap_or(0) as f64;
+                    let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+                    score += idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * doc_len / avgdl));
+                }
+
+                (path.clone(), content.clone(), score)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        scored
+    }
+
+    pub fn update_file(&mut self, path: &Path, new_content: &str) {
+        if let Some(idx) = self.files.iter().position(|(p, _)| p == path) {
+            self.remove_trigrams_for(idx);
+            self.remove_bm25_for(idx);
+            self.files[idx].1 = new_content.to_string();
+            self.add_trigrams_for(idx);
+            self.add_bm25_for(idx);
+        } else {
+            self.files.push((path.to_path_buf(), new_content.to_string()));
+            let idx = self.files.len() - 1;
+            self.add_trigrams_for(idx);
+            self.doc_lengths.push(0);
+            self.total_docs += 1;
+            self.add_bm25_for(idx);
+        }
+    }
+
+    /// Remove a file from the index entirely.
+    pub fn remove_file(&mut self, path: &Path) {
+        if let Some(idx) = self.files.iter().position(|(p, _)| p == path) {
+            // Remove trigrams for this index
+            self.remove_trigrams_for(idx);
+            // Remove BM25 stats for this file
+            self.remove_bm25_for(idx);
+            // Remove the doc_lengths entry
+            self.doc_lengths.remove(idx);
+            self.total_docs = self.total_docs.saturating_sub(1);
+            // Remove the file entry
+            self.files.remove(idx);
+            // Shift all trigram indices > idx down by 1
+            for indices in self.trigrams.values_mut() {
+                indices.retain(|&i| i != idx);
+                for i in indices.iter_mut() {
+                    if *i > idx {
+                        *i -= 1;
+                    }
+                }
+            }
+            // Clean up empty trigram entries
+            self.trigrams.retain(|_, v| !v.is_empty());
+            // Recompute avg_doc_length
+            self.recompute_avg_doc_length();
+        }
+    }
+
+    /// Add a new file to the index.
+    pub fn add_file(&mut self, path: &Path, content: &str) {
+        self.files.push((path.to_path_buf(), content.to_string()));
+        let idx = self.files.len() - 1;
+        self.doc_lengths.push(0);
+        self.total_docs += 1;
+        self.add_trigrams_for(idx);
+        self.add_bm25_for(idx);
+    }
+
+    /// Remove all trigram entries for a given file index.
+    fn remove_trigrams_for(&mut self, idx: usize) {
+        for indices in self.trigrams.values_mut() {
+            indices.retain(|&i| i != idx);
+        }
+        self.trigrams.retain(|_, v| !v.is_empty());
+    }
+
+    /// Add trigram entries for a given file index.
+    fn add_trigrams_for(&mut self, idx: usize) {
+        let lower = self.files[idx].1.to_lowercase();
+        let bytes = lower.as_bytes();
+        let mut seen = std::collections::HashSet::new();
+        for window in bytes.windows(3) {
+            let tri = [window[0], window[1], window[2]];
+            if seen.insert(tri) {
+                self.trigrams.entry(tri).or_default().push(idx);
+            }
+        }
+    }
+
+    /// Remove BM25 doc_freq contributions for a file (before content change or removal).
+    fn remove_bm25_for(&mut self, idx: usize) {
+        let lower = self.files[idx].1.to_lowercase();
+        let unique_words: HashSet<&str> = lower.split_whitespace().collect();
+        for word in unique_words {
+            if let Some(count) = self.doc_freq.get_mut(word) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.doc_freq.remove(word);
+                }
+            }
+        }
+    }
+
+    /// Add BM25 doc_freq contributions and update doc_length for a file (after content change or addition).
+    fn add_bm25_for(&mut self, idx: usize) {
+        let content = &self.files[idx].1;
+        let word_count = content.split_whitespace().count();
+        self.doc_lengths[idx] = word_count;
+
+        let lower = content.to_lowercase();
+        let unique_words: HashSet<&str> = lower.split_whitespace().collect();
+        for word in unique_words {
+            *self.doc_freq.entry(word.to_string()).or_insert(0) += 1;
+        }
+
+        self.recompute_avg_doc_length();
+    }
+
+    /// Recompute avg_doc_length from current doc_lengths.
+    fn recompute_avg_doc_length(&mut self) {
+        if self.doc_lengths.is_empty() {
+            self.avg_doc_length = 0.0;
+        } else {
+            let total: usize = self.doc_lengths.iter().sum();
+            self.avg_doc_length = total as f64 / self.doc_lengths.len() as f64;
+        }
+    }
+}
