@@ -1,5 +1,11 @@
 # Librarian
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-Skill-blueviolet?logo=anthropic)](https://claude.ai/code)
+[![MCP](https://img.shields.io/badge/MCP-Server-orange?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDJMMyA3djEwbDkgNSA5LTV2LTEweiIvPjwvc3ZnPg==)](https://modelcontextprotocol.io)
+[![Homebrew](https://img.shields.io/badge/Homebrew-Available-FBB040?logo=homebrew&logoColor=white)](https://github.com/ngmeyer/homebrew-tap)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)]()
+
 Give Claude a librarian for your markdown vault.
 
 Librarian is an MCP server that connects [Claude](https://claude.ai) to your [Obsidian](https://obsidian.md) vault or any folder of markdown files. Search your notes, auto-link mentions as wikilinks, explore backlinks and tags, import documents — all from inside Claude.
@@ -11,17 +17,17 @@ Inspired by [Karpathy's wiki-as-memory](https://x.com/karpathy) approach: use a 
 ### Homebrew (macOS)
 
 ```bash
-brew install nealme/tap/librarian-mcp
+brew install ngmeyer/tap/librarian-mcp
 ```
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/nealme/librarian-mcp/releases) for macOS (arm64/x86_64), Linux, and Windows.
+Download from [GitHub Releases](https://github.com/ngmeyer/librarian-mcp/releases) for macOS (arm64/x86_64), Linux, and Windows.
 
 ### Build from source
 
 ```bash
-cargo install --git https://github.com/nealme/librarian-mcp --bin librarian-mcp
+cargo install --git https://github.com/ngmeyer/librarian-mcp --bin librarian-mcp
 ```
 
 ## Setup
