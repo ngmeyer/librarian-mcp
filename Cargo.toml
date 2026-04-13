@@ -5,8 +5,8 @@ edition = "2021"
 description = "Give Claude a librarian for your markdown vault"
 authors = ["Neal Meyer"]
 license = "MIT"
-repository = "https://github.com/nealme/librarian-mcp"
-homepage = "https://github.com/nealme/librarian-mcp"
+repository = "https://github.com/ngmeyer/librarian-mcp"
+homepage = "https://github.com/ngmeyer/librarian-mcp"
 
 [[bin]]
 name = "librarian-mcp"
