@@ -8,7 +8,7 @@
 
 Give Claude a librarian for your markdown vault.
 
-Librarian is an MCP server that connects [Claude](https://claude.ai) to your [Obsidian](https://obsidian.md) vault or any folder of markdown files. Search your notes, auto-link mentions as wikilinks, explore backlinks and tags, detect topic communities, and visualize your knowledge graph — all from inside Claude.
+Librarian is the **Karpathy LLM Wiki** pattern, productionized as an MCP server — bidirectional graph traversal, auto-wikilinks, trigram search, community detection, and a D3 graph view, all from inside Claude. Works against any [Obsidian](https://obsidian.md) vault or plain folder of markdown files.
 
 > **Runs entirely locally.** Your vault data never leaves your machine. Librarian reads and writes files on disk and communicates with Claude over stdio. No network calls, no telemetry, no cloud storage.
 
