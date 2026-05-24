@@ -997,4 +997,36 @@ impl LibraryServer {
 // ── Server handler ────────────────────────────────────────────────────
 
 #[tool_handler]
-impl ServerHandler for LibraryServer {}
+impl ServerHandler for LibraryServer {
+    // `#[tool_handler]` generates call_tool/list_tools but NOT get_info, so the
+    // default get_info() advertises empty capabilities. Clients that honor the
+    // advertised capabilities (Claude Code logs `hasTools:false`) then skip
+    // tools/list entirely and load zero tools. Declare the tools capability here.
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::VaultCache;
+    use std::sync::{Arc, Mutex};
+
+    // Regression guard: a refactor or rmcp bump must not silently drop the
+    // advertised tools capability. Without it, clients log `hasTools:false`
+    // and never call tools/list, so zero tools load.
+    #[test]
+    fn advertises_tools_capability() {
+        let server = LibraryServer {
+            library_paths: vec![],
+            default_ignores: vec![],
+            cache: Arc::new(Mutex::new(VaultCache::default())),
+            tool_router: LibraryServer::new_tool_router(),
+        };
+        assert!(
+            server.get_info().capabilities.tools.is_some(),
+            "server must advertise the tools capability"
+        );
+    }
+}
