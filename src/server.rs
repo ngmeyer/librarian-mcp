@@ -13,14 +13,45 @@ pub struct LibraryServer {
     pub library_paths: Vec<PathBuf>,
     /// Default exclusion patterns when no .librarianignore exists
     pub default_ignores: Vec<String>,
+    /// Lowercased note stems/aliases the auto-linker must never link
+    /// (generic structural filenames like INDEX/README/SKILL that match
+    /// common words and pollute the graph with cross-domain false edges).
+    pub link_stoplist: Vec<String>,
     /// Unified vault cache (search index, graph, titles)
     pub cache: std::sync::Arc<Mutex<VaultCache>>,
     pub tool_router: ToolRouter<Self>,
 }
 
+/// Generic stems excluded from auto-linking by default. These are structural
+/// or template filenames whose stems collide with everyday prose words, so
+/// matching them creates noise rather than meaningful links. Extend per-vault
+/// with a `.librarianstoplist` file (one term per line) in the vault root.
+pub const DEFAULT_LINK_STOPLIST: &[&str] = &[
+    "claude", "skill", "index", "readme", "memory", "language",
+    "changelog", "filename", "critic-prompt", "scoring-rubric",
+];
+
 impl LibraryServer {
     /// Resolve a relative path against vault roots. Returns the first match,
     /// or falls back to the first vault root for new files.
+    /// Build the auto-link stoplist: the hardcoded defaults plus any terms
+    /// listed in a `.librarianstoplist` file at any vault root. All lowercased.
+    pub fn build_link_stoplist(library_paths: &[PathBuf]) -> Vec<String> {
+        let mut stop: HashSet<String> =
+            DEFAULT_LINK_STOPLIST.iter().map(|s| s.to_string()).collect();
+        for root in library_paths {
+            if let Ok(contents) = std::fs::read_to_string(root.join(".librarianstoplist")) {
+                for line in contents.lines() {
+                    let term = line.trim();
+                    if !term.is_empty() && !term.starts_with('#') {
+                        stop.insert(term.to_lowercase());
+                    }
+                }
+            }
+        }
+        stop.into_iter().collect()
+    }
+
     pub fn resolve_path(&self, rel: &str) -> PathBuf {
         for root in &self.library_paths {
             let candidate = root.join(rel);
@@ -148,6 +179,7 @@ impl LibraryServer {
             .filter(|(match_term, canonical, rel)| {
                 match_term.len() >= 3
                     && rel != exclude_path
+                    && !self.link_stoplist.contains(&match_term.to_lowercase())
                     && !existing_set.contains(canonical.as_str())
                     && !existing_set.contains(match_term.as_str())
             })

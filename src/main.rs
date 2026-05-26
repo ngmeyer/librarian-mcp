@@ -1,5 +1,6 @@
 mod cache;
 mod graph;
+mod index;
 mod report;
 mod search;
 mod server;
@@ -78,9 +79,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Build a temporary server to access all_md_files for cache building
+    let link_stoplist = LibraryServer::build_link_stoplist(&library_paths);
     let server = LibraryServer {
         library_paths,
         default_ignores,
+        link_stoplist,
         cache: std::sync::Arc::new(Mutex::new(VaultCache::default())),
         tool_router: LibraryServer::new_tool_router(),
     };

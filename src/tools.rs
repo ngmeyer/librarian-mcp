@@ -49,6 +49,13 @@ pub struct LinksParams {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IndexParams {
+    /// Topic to regenerate (matches an Index/<Topic>.md note). Omit to
+    /// regenerate every existing Index/*.md hub.
+    pub topic: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagsParams {
     /// Optional tag prefix filter
@@ -992,6 +999,83 @@ impl LibraryServer {
             )])),
         }
     }
+
+    #[tool(description = "Regenerate topic Index/<Topic>.md map-of-content (MOC) notes from the live graph so newly-added notes gain backlinks from their topic hub instead of staying orphaned. Pass `topic` to rebuild one hub, or omit to rebuild every existing Index/*.md. Relatedness = full-text search for the topic name plus the topic's graph neighbors, grouped by directory. Backs up overwritten notes to Index/.bak-<date>/ first.")]
+    async fn library_index(
+        &self,
+        params: Parameters<IndexParams>,
+    ) -> Result<CallToolResult, McpError> {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.check_and_refresh(self);
+        }
+
+        let root = &self.library_paths[0];
+        let index_dir = root.join("Index");
+
+        let topics: Vec<String> = match &params.0.topic {
+            Some(t) => vec![t.clone()],
+            None => {
+                let mut v = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&index_dir) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p.extension().map_or(false, |x| x == "md") {
+                            if let Some(stem) = p.file_stem() {
+                                v.push(stem.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+                v.sort();
+                v
+            }
+        };
+
+        if topics.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "No Index/ topics found. Create Index/<Topic>.md notes first, or pass a `topic`."
+                    .to_string(),
+            )]));
+        }
+
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let backup_dir = index_dir.join(format!(".bak-{}", date));
+        let mut total_links = 0usize;
+        let mut lines = Vec::new();
+
+        for topic in &topics {
+            let note_path = index_dir.join(format!("{}.md", topic));
+            let existing = std::fs::read_to_string(&note_path).unwrap_or_default();
+            let description = crate::index::extract_description(&existing);
+
+            // Back up the existing note before overwriting (reversible).
+            if !existing.is_empty() {
+                let _ = std::fs::create_dir_all(&backup_dir);
+                let _ = std::fs::write(backup_dir.join(format!("{}.md", topic)), &existing);
+            }
+
+            let (body, related, dirs) = crate::index::generate_index_body(self, topic, &description);
+            match std::fs::write(&note_path, &body) {
+                Ok(_) => {
+                    if let Ok(mut cache) = self.cache.lock() {
+                        cache.update_single_file(&note_path, &body, self);
+                    }
+                    total_links += related;
+                    lines.push(format!("  {} — {} notes / {} dirs", topic, related, dirs));
+                }
+                Err(e) => lines.push(format!("  {} — FAILED: {}", topic, e)),
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Regenerated {} index MOC(s); {} total backlinks written.\nBackup: Index/.bak-{}/\n\n{}",
+            topics.len(),
+            total_links,
+            date,
+            lines.join("\n"),
+        ))]))
+    }
 }
 
 // ── Server handler ────────────────────────────────────────────────────
@@ -1021,6 +1105,7 @@ mod tests {
         let server = LibraryServer {
             library_paths: vec![],
             default_ignores: vec![],
+            link_stoplist: vec![],
             cache: Arc::new(Mutex::new(VaultCache::default())),
             tool_router: LibraryServer::new_tool_router(),
         };
@@ -1028,5 +1113,27 @@ mod tests {
             server.get_info().capabilities.tools.is_some(),
             "server must advertise the tools capability"
         );
+    }
+
+    // The auto-linker must skip stoplisted generic stems (e.g. "claude") while
+    // still linking real topic notes, so generic words stop polluting the graph.
+    #[test]
+    fn auto_link_respects_stoplist() {
+        let server = LibraryServer {
+            library_paths: vec![],
+            default_ignores: vec![],
+            link_stoplist: vec!["claude".to_string()],
+            cache: Arc::new(Mutex::new(VaultCache::default())),
+            tool_router: LibraryServer::new_tool_router(),
+        };
+        let titles = vec![
+            ("Claude".to_string(), "Claude".to_string(), "Index/Claude.md".to_string()),
+            ("QuantFlow".to_string(), "QuantFlow".to_string(), "Index/QuantFlow.md".to_string()),
+        ];
+        let (out, added) =
+            server.auto_link_content("Ask Claude about QuantFlow tuning.", "note.md", &titles);
+        assert!(!added.iter().any(|l| l == "Claude"), "stoplisted stem must not link");
+        assert!(added.iter().any(|l| l == "QuantFlow"), "real topic must still link");
+        assert!(out.contains("[[QuantFlow]]") && !out.contains("[[Claude]]"));
     }
 }
