@@ -56,6 +56,13 @@ pub struct IndexParams {
     pub topic: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EvalParams {
+    /// Probe queries to evaluate retrieval against. Omit to use the existing
+    /// Index/<Topic>.md topic names as probes.
+    pub queries: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagsParams {
     /// Optional tag prefix filter
@@ -94,6 +101,10 @@ pub struct TraverseParams {
     pub depth: Option<usize>,
     /// Optional tag filter — only include notes with this tag
     pub tag_filter: Option<String>,
+    /// Optional query for relevance-weighted traversal: reached notes are
+    /// scored by relevance to this query and returned most-relevant first,
+    /// so the noisy graph neighbourhood is reordered into a RAG-style result.
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -558,24 +569,60 @@ impl LibraryServer {
             }
         }
 
-        let nodes: Vec<_> = if let Some(ref tag_filter) = params.0.tag_filter {
-            visited.iter()
-                .filter(|(node, _)| {
-                    self.all_md_files().iter().any(|p| {
-                        let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                        if &stem != *node { return false; }
-                        if let Ok(content) = std::fs::read_to_string(p) {
-                            Self::extract_tags(&content).iter().any(|t| t == tag_filter)
-                        } else { false }
+        // Collect (node, depth), honoring the optional tag filter.
+        let mut node_pairs: Vec<(String, usize)> = visited
+            .iter()
+            .filter(|(node, _)| match &params.0.tag_filter {
+                None => true,
+                Some(tag_filter) => self.all_md_files().iter().any(|p| {
+                    let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    if &stem != *node { return false; }
+                    if let Ok(content) = std::fs::read_to_string(p) {
+                        Self::extract_tags(&content).iter().any(|t| t == tag_filter)
+                    } else { false }
+                }),
+            })
+            .map(|(node, depth)| (node.clone(), *depth))
+            .collect();
+
+        // Relevance-weighted traversal: when a query is given, score reached
+        // notes by relevance to it and return most-relevant first (RAG order).
+        let scores: HashMap<String, f64> = match &params.0.query {
+            Some(q) => {
+                let cache = self.cache.lock().unwrap();
+                cache.search_index.search(q, 300).iter()
+                    .filter_map(|(p, _, s)| {
+                        p.file_stem().map(|st| (st.to_string_lossy().to_string(), *s))
                     })
-                })
-                .map(|(node, depth)| serde_json::json!({ "note": node, "depth": depth }))
-                .collect()
-        } else {
-            visited.iter()
-                .map(|(node, depth)| serde_json::json!({ "note": node, "depth": depth }))
-                .collect()
+                    .collect()
+            }
+            None => HashMap::new(),
         };
+
+        if params.0.query.is_some() {
+            node_pairs.sort_by(|a, b| {
+                let sb = scores.get(&b.0).copied().unwrap_or(0.0);
+                let sa = scores.get(&a.0).copied().unwrap_or(0.0);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1))
+            });
+        } else {
+            node_pairs.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        }
+
+        let nodes: Vec<_> = node_pairs
+            .iter()
+            .map(|(node, depth)| {
+                if params.0.query.is_some() {
+                    serde_json::json!({
+                        "note": node,
+                        "depth": depth,
+                        "relevance": format!("{:.2}", scores.get(node).copied().unwrap_or(0.0)),
+                    })
+                } else {
+                    serde_json::json!({ "note": node, "depth": depth })
+                }
+            })
+            .collect();
 
         let mut unique_edges: Vec<(String, String)> = edges;
         unique_edges.sort();
@@ -1075,6 +1122,74 @@ impl LibraryServer {
             date,
             lines.join("\n"),
         ))]))
+    }
+
+    #[tool(description = "Evaluate the knowledge graph as RAG-for-the-brain. Reports link relevancy (share of edges within one topic community), connectivity (largest connected component), and traversal-to-relevant recall: for each probe query, land on the top search hit and measure what fraction of the top-20 search-relevant notes is reachable within 1 and 2 hops, plus mean hop distance. Pass `queries`, or omit to probe with the Index/ topic names.")]
+    async fn library_eval(
+        &self,
+        params: Parameters<EvalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.check_and_refresh(self);
+        }
+
+        let queries: Vec<String> = match &params.0.queries {
+            Some(q) if !q.is_empty() => q.clone(),
+            _ => {
+                let mut v = Vec::new();
+                let index_dir = self.library_paths[0].join("Index");
+                if let Ok(entries) = std::fs::read_dir(&index_dir) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p.extension().map_or(false, |x| x == "md") {
+                            if let Some(s) = p.file_stem() {
+                                v.push(s.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+                v.sort();
+                v
+            }
+        };
+
+        let report = crate::eval::evaluate(self, &queries, 20, 2);
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Graph retrieval quality (RAG simulation)\n\
+             ── Structure ──\n\
+             Edges: {} | Intra-community (relevant) links: {:.0}% | Largest connected component: {:.0}% of nodes\n\
+             ── Traversal-to-relevant (top-20 search hits; seed = top hit; up to 2 hops) ──\n\
+             Mean recall@1hop: {:.0}% | recall@2hops: {:.0}% | mean hops-to-relevant: {:.2}\n\
+             ── Expansion precision@10 (relevant share of the 2-hop neighbourhood) ──\n\
+             Raw BFS order: {:.0}% → relevance-ranked: {:.0}%  (lift +{:.0} pts) | probes: {}\n",
+            report.total_edges,
+            report.intra_community_pct,
+            report.largest_component_pct,
+            report.mean_recall1 * 100.0,
+            report.mean_recall2 * 100.0,
+            report.mean_hops,
+            report.mean_raw_precision * 100.0,
+            report.mean_ranked_precision * 100.0,
+            (report.mean_ranked_precision - report.mean_raw_precision) * 100.0,
+            report.per_query.len(),
+        ));
+        out.push_str("\nPer query  (recall@1 / recall@2 / hops | prec raw→ranked):\n");
+        for p in &report.per_query {
+            out.push_str(&format!(
+                "  {:<26} {:>3.0}% / {:>3.0}% / {:.2} | {:>3.0}%→{:>3.0}%  (rel={})\n",
+                p.query,
+                p.recall1 * 100.0,
+                p.recall2 * 100.0,
+                p.mean_hops,
+                p.raw_precision * 100.0,
+                p.ranked_precision * 100.0,
+                p.relevant
+            ));
+        }
+        Ok(CallToolResult::success(vec![Content::text(out)]))
     }
 }
 
