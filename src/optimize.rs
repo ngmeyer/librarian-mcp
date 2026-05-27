@@ -331,13 +331,15 @@ pub fn optimize(
                         continue;
                     }
                     let a_dir = top_dir.get(a).map(|s| s.as_str()).unwrap_or("");
-                    // Rank same-community peers by shared distinctive terms, but
-                    // never cross an isolated-folder boundary (e.g. a book dir).
+                    // Densify stays within the note's own top-level folder: a
+                    // tight, high-precision scope that also respects isolation
+                    // for free. Cross-folder links are the job of hubs / the
+                    // global auto-linker, governed by .librarianisolate.
                     let mut scored: Vec<(usize, &String)> = members
                         .iter()
                         .filter(|b| {
                             let b_dir = top_dir.get(*b).map(|s| s.as_str()).unwrap_or("");
-                            *b != a && !server.crosses_isolation(a_dir, b_dir)
+                            *b != a && b_dir == a_dir
                         })
                         .filter_map(|b| {
                             let shared = term_sets.get(b).map_or(0, |tb| ta.intersection(tb).count());
