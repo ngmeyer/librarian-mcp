@@ -62,8 +62,11 @@ pub fn detect_communities(
         .map(|(k, v)| (k, v.len() as f64))
         .collect();
 
-    // Initialize: each node in its own community
-    let nodes: Vec<String> = adj.keys().cloned().collect();
+    // Initialize: each node in its own community. Sort for determinism —
+    // HashMap key order is randomized per-run, and node processing order
+    // changes the greedy Louvain result (and thus every downstream metric).
+    let mut nodes: Vec<String> = adj.keys().cloned().collect();
+    nodes.sort();
     let mut community_of: HashMap<String, usize> = HashMap::new();
     for (i, node) in nodes.iter().enumerate() {
         community_of.insert(node.clone(), i);
@@ -98,7 +101,12 @@ pub fn detect_communities(
             let mut best_comm = node_comm;
             let mut best_gain = 0.0f64;
 
-            for (&candidate_comm, &edges_to_comm) in &comm_edges {
+            // Sorted candidate order so ties resolve to the lowest community
+            // id deterministically (HashMap iteration order is randomized).
+            let mut candidates: Vec<(usize, f64)> =
+                comm_edges.iter().map(|(&c, &e)| (c, e)).collect();
+            candidates.sort_by_key(|(c, _)| *c);
+            for (candidate_comm, edges_to_comm) in candidates {
                 if candidate_comm == node_comm {
                     continue;
                 }
