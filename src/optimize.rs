@@ -145,6 +145,45 @@ fn community_label(members: &[String], adj: &HashMap<String, HashSet<String>>) -
         .unwrap_or_default()
 }
 
+/// Name a community by its most-shared distinctive terms (Title Case, joined).
+/// This is generic and avoids colliding with an existing note's stem, unlike
+/// naming the hub after a member note.
+fn community_topic_name(
+    members: &[String],
+    term_sets: &HashMap<String, HashSet<String>>,
+    idf: &HashMap<String, f64>,
+) -> String {
+    // Score = (members sharing the term) weighted by IDF, so the name is built
+    // from terms that are both common *within* the community and distinctive
+    // *across* the vault — not generic high-frequency words.
+    let mut freq: HashMap<&str, usize> = HashMap::new();
+    for m in members {
+        if let Some(ts) = term_sets.get(m) {
+            for t in ts {
+                *freq.entry(t.as_str()).or_default() += 1;
+            }
+        }
+    }
+    let mut terms: Vec<(&str, f64)> = freq
+        .into_iter()
+        .filter(|(_, c)| *c >= 2)
+        .map(|(t, c)| (t, c as f64 * idf.get(t).copied().unwrap_or(0.0)))
+        .collect();
+    terms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(b.0)));
+    let top: Vec<String> = terms
+        .iter()
+        .take(3)
+        .map(|(t, _)| {
+            let mut ch = t.chars();
+            match ch.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    top.join(" ")
+}
+
 pub struct PlannedAction {
     /// Hub note stem -> member stems to link from it.
     pub hubs: BTreeMap<String, Vec<String>>,
@@ -157,13 +196,14 @@ pub fn optimize(
     iterations: usize,
     min_community: usize,
     max_links_per_note: usize,
+    min_shared: usize,
     do_hubs: bool,
     do_densify: bool,
     apply: bool,
 ) -> (OptimizeReport, PlannedAction) {
     // Base graph + file stems + stem->rel map + distinctive term sets (built
     // once; densification scores similarity locally instead of re-searching).
-    let (mut out, mut inc, file_stems, stem_to_rel, term_sets) = {
+    let (mut out, mut inc, file_stems, stem_to_rel, term_sets, idf) = {
         let c = server.cache.lock().unwrap();
         let mut stems = HashSet::new();
         let mut s2r = HashMap::new();
@@ -173,26 +213,38 @@ pub fn optimize(
         }
         let total = c.search_index.total_docs.max(1);
         let mut ts: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut idf: HashMap<String, f64> = HashMap::new();
         for (path, content) in &c.search_index.files {
             let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
                 continue;
             };
             let mut terms = HashSet::new();
             for w in content.to_lowercase().split(|ch: char| !ch.is_alphanumeric()) {
-                if w.len() < 4 {
+                // Distinctive content words only: skip short tokens and pure
+                // numbers (years like "2026" pollute community names).
+                if w.len() < 4 || w.chars().all(|ch| ch.is_numeric()) {
                     continue;
                 }
                 let df = c.search_index.doc_freq.get(w).copied().unwrap_or(0);
-                // Skip words absent from the index and very common ones (low signal).
                 if df == 0 || df * 2 > total {
                     continue;
                 }
                 terms.insert(w.to_string());
+                idf.entry(w.to_string())
+                    .or_insert_with(|| (total as f64 / df as f64).ln());
             }
             ts.insert(stem, terms);
         }
-        (c.outgoing.clone(), c.incoming.clone(), stems, s2r, ts)
+        (c.outgoing.clone(), c.incoming.clone(), stems, s2r, ts, idf)
     };
+
+    // Top-level directory per note. Densification never crosses this boundary,
+    // so e.g. a fiction book folder stays self-contained and work notes don't
+    // bleed into it — directory is a strong, intentional topic boundary.
+    let top_dir: HashMap<String, String> = stem_to_rel
+        .iter()
+        .map(|(s, rel)| (s.clone(), rel.split('/').next().unwrap_or("").to_string()))
+        .collect();
 
     // Existing Index hubs (don't recreate).
     let existing_hubs: HashSet<String> = stem_to_rel
@@ -229,17 +281,25 @@ pub fn optimize(
                 if members.len() < min_community {
                     continue;
                 }
-                let label = community_label(members, &adj);
-                if label.is_empty()
-                    || existing_hubs.contains(&label)
-                    || created_hub_stems.contains(&label)
-                {
+                // Name by distinctive terms; fall back to top node if none.
+                let mut label = community_topic_name(members, &term_sets, &idf);
+                if label.is_empty() {
+                    label = community_label(members, &adj);
+                }
+                if label.is_empty() {
                     continue;
                 }
-                // Link the hub to community members that are real notes.
+                // Never collide with an existing note stem or hub (would create
+                // a duplicate-stem note and break wikilink resolution).
+                if file_stems.contains(&label) || existing_hubs.contains(&label) {
+                    label = format!("{} Map", label);
+                }
+                if created_hub_stems.contains(&label) {
+                    continue;
+                }
                 let linked: Vec<String> = members
                     .iter()
-                    .filter(|m| **m != label && file_stems.contains(*m))
+                    .filter(|m| file_stems.contains(*m))
                     .cloned()
                     .collect();
                 if linked.len() < min_community {
@@ -270,13 +330,15 @@ pub fn optimize(
                     if ta.is_empty() {
                         continue;
                     }
-                    // Rank same-community peers by shared distinctive terms.
+                    let a_dir = top_dir.get(a);
+                    // Rank peers that share the community AND the top-level folder,
+                    // by count of shared distinctive terms (>= min_shared).
                     let mut scored: Vec<(usize, &String)> = members
                         .iter()
-                        .filter(|b| *b != a)
+                        .filter(|b| *b != a && top_dir.get(*b) == a_dir)
                         .filter_map(|b| {
                             let shared = term_sets.get(b).map_or(0, |tb| ta.intersection(tb).count());
-                            if shared >= 3 { Some((shared, b)) } else { None }
+                            if shared >= min_shared { Some((shared, b)) } else { None }
                         })
                         .collect();
                     scored.sort_by(|x, y| y.0.cmp(&x.0).then_with(|| x.1.cmp(y.1)));

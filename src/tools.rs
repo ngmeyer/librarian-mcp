@@ -71,6 +71,9 @@ pub struct OptimizeParams {
     pub min_community: Option<usize>,
     /// Max intra-community links to add per note during densification (default 3).
     pub max_links_per_note: Option<usize>,
+    /// Minimum shared distinctive terms for a densify link (default 3; raise for
+    /// fewer, higher-confidence links).
+    pub min_shared_terms: Option<usize>,
     /// Generate community hub MOCs (default true).
     pub hubs: Option<bool>,
     /// Add intra-community Related(auto) links in note bodies (default true).
@@ -1220,12 +1223,13 @@ impl LibraryServer {
         let iterations = params.0.iterations.unwrap_or(3);
         let min_community = params.0.min_community.unwrap_or(4);
         let max_links = params.0.max_links_per_note.unwrap_or(3);
+        let min_shared = params.0.min_shared_terms.unwrap_or(3);
         let do_hubs = params.0.hubs.unwrap_or(true);
         let do_densify = params.0.densify.unwrap_or(true);
         let apply = params.0.apply.unwrap_or(false);
 
         let (report, plan) = crate::optimize::optimize(
-            self, iterations, min_community, max_links, do_hubs, do_densify, apply,
+            self, iterations, min_community, max_links, min_shared, do_hubs, do_densify, apply,
         );
 
         let mut applied_note = String::new();
@@ -1244,18 +1248,39 @@ impl LibraryServer {
                 m
             };
 
-            // Hubs: regenerate as standard MOC notes.
-            for (label, _) in &plan.hubs {
+            // Hubs: write a MOC linking exactly the planned community members.
+            let hub_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            for (label, members) in &plan.hubs {
                 let note_path = root.join("Index").join(format!("{}.md", label));
                 if let Ok(existing) = std::fs::read_to_string(&note_path) {
                     let bak = backup.join("Index").join(format!("{}.md", label));
                     if let Some(p) = bak.parent() { let _ = std::fs::create_dir_all(p); }
                     let _ = std::fs::write(bak, existing);
                 }
-                let (body, _, _) = crate::index::generate_index_body(self, label, "");
-                if std::fs::create_dir_all(note_path.parent().unwrap()).is_ok()
-                    && std::fs::write(&note_path, &body).is_ok()
-                {
+                let mut by_dir: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+                for m in members {
+                    let rel = stem_to_rel.get(m).cloned().unwrap_or_default();
+                    let dir = std::path::Path::new(&rel)
+                        .parent()
+                        .map(|d| d.to_string_lossy().to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "(root)".to_string());
+                    by_dir.entry(dir).or_default().push(m.clone());
+                }
+                let mut body = format!(
+                    "---\ntitle: \"{}\"\ntype: index\nauto-generated: true\ndate: {}\nsource: library_optimize\n---\n\n# {}\n\n**{} related notes** (auto-clustered by community).\n",
+                    label, hub_date, label, members.len()
+                );
+                for (dir, stems) in &by_dir {
+                    body.push_str(&format!("\n## {}\n\n", dir));
+                    let mut s = stems.clone();
+                    s.sort();
+                    for st in s {
+                        body.push_str(&format!("- [[{}]]\n", st));
+                    }
+                }
+                let _ = std::fs::create_dir_all(note_path.parent().unwrap());
+                if std::fs::write(&note_path, &body).is_ok() {
                     if let Ok(mut c) = self.cache.lock() {
                         c.update_single_file(&note_path, &body, self);
                     }
