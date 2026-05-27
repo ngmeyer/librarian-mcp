@@ -82,10 +82,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build a temporary server to access all_md_files for cache building
     let link_stoplist = LibraryServer::build_link_stoplist(&library_paths);
+    let isolated_folders = LibraryServer::build_isolated_folders(&library_paths);
     let server = LibraryServer {
         library_paths,
         default_ignores,
         link_stoplist,
+        isolated_folders,
         cache: std::sync::Arc::new(Mutex::new(VaultCache::default())),
         tool_router: LibraryServer::new_tool_router(),
     };

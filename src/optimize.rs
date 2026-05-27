@@ -330,12 +330,15 @@ pub fn optimize(
                     if ta.is_empty() {
                         continue;
                     }
-                    let a_dir = top_dir.get(a);
-                    // Rank peers that share the community AND the top-level folder,
-                    // by count of shared distinctive terms (>= min_shared).
+                    let a_dir = top_dir.get(a).map(|s| s.as_str()).unwrap_or("");
+                    // Rank same-community peers by shared distinctive terms, but
+                    // never cross an isolated-folder boundary (e.g. a book dir).
                     let mut scored: Vec<(usize, &String)> = members
                         .iter()
-                        .filter(|b| *b != a && top_dir.get(*b) == a_dir)
+                        .filter(|b| {
+                            let b_dir = top_dir.get(*b).map(|s| s.as_str()).unwrap_or("");
+                            *b != a && !server.crosses_isolation(a_dir, b_dir)
+                        })
                         .filter_map(|b| {
                             let shared = term_sets.get(b).map_or(0, |tb| ta.intersection(tb).count());
                             if shared >= min_shared { Some((shared, b)) } else { None }

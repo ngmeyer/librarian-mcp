@@ -63,8 +63,12 @@ pub fn generate_index_body(server: &LibraryServer, topic: &str, description: &st
         }
     }
 
-    // Exclude all Index notes (other hubs + this topic itself).
-    related.retain(|rel| !rel.starts_with("Index/"));
+    // Exclude other Index notes, and anything that would cross an isolated
+    // folder boundary relative to the hub (hubs live in Index/).
+    related.retain(|rel| {
+        !rel.starts_with("Index/")
+            && !server.crosses_isolation("Index", LibraryServer::top_folder(rel))
+    });
 
     // Group by parent directory.
     let mut by_dir: BTreeMap<String, Vec<String>> = BTreeMap::new();

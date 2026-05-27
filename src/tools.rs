@@ -1395,6 +1395,7 @@ mod tests {
             library_paths: vec![],
             default_ignores: vec![],
             link_stoplist: vec![],
+            isolated_folders: vec![],
             cache: Arc::new(Mutex::new(VaultCache::default())),
             tool_router: LibraryServer::new_tool_router(),
         };
@@ -1412,6 +1413,7 @@ mod tests {
             library_paths: vec![],
             default_ignores: vec![],
             link_stoplist: vec!["claude".to_string()],
+            isolated_folders: vec![],
             cache: Arc::new(Mutex::new(VaultCache::default())),
             tool_router: LibraryServer::new_tool_router(),
         };
@@ -1424,5 +1426,30 @@ mod tests {
         assert!(!added.iter().any(|l| l == "Claude"), "stoplisted stem must not link");
         assert!(added.iter().any(|l| l == "QuantFlow"), "real topic must still link");
         assert!(out.contains("[[QuantFlow]]") && !out.contains("[[Claude]]"));
+    }
+
+    // Isolated folders never link across their boundary in either direction.
+    #[test]
+    fn auto_link_respects_folder_isolation() {
+        let server = LibraryServer {
+            library_paths: vec![],
+            default_ignores: vec![],
+            link_stoplist: vec![],
+            isolated_folders: vec!["Threshold".to_string()],
+            cache: Arc::new(Mutex::new(VaultCache::default())),
+            tool_router: LibraryServer::new_tool_router(),
+        };
+        let titles = vec![
+            ("POV Tracker".to_string(), "POV Tracker".to_string(), "Threshold/POV Tracker.md".to_string()),
+            ("QuantFlow".to_string(), "QuantFlow".to_string(), "Index/QuantFlow.md".to_string()),
+        ];
+        // Writing a Research note: must not link into isolated Threshold/, may link elsewhere.
+        let (_o, added) = server.auto_link_content(
+            "Notes on POV Tracker and QuantFlow.",
+            "Research/note.md",
+            &titles,
+        );
+        assert!(!added.iter().any(|l| l == "POV Tracker"), "must not cross into isolated folder");
+        assert!(added.iter().any(|l| l == "QuantFlow"), "non-isolated link still allowed");
     }
 }

@@ -17,6 +17,10 @@ pub struct LibraryServer {
     /// (generic structural filenames like INDEX/README/SKILL that match
     /// common words and pollute the graph with cross-domain false edges).
     pub link_stoplist: Vec<String>,
+    /// Top-level folders that must stay self-contained: no auto-created link
+    /// may cross their boundary in either direction (e.g. a fiction book dir).
+    /// Loaded from `.librarianisolate` in the vault root.
+    pub isolated_folders: Vec<String>,
     /// Unified vault cache (search index, graph, titles)
     pub cache: std::sync::Arc<Mutex<VaultCache>>,
     pub tool_router: ToolRouter<Self>,
@@ -50,6 +54,36 @@ impl LibraryServer {
             }
         }
         stop.into_iter().collect()
+    }
+
+    /// Load isolated top-level folder names from `.librarianisolate` files
+    /// (one folder per line; trailing slashes and `#` comments ignored).
+    pub fn build_isolated_folders(library_paths: &[PathBuf]) -> Vec<String> {
+        let mut set: HashSet<String> = HashSet::new();
+        for root in library_paths {
+            if let Ok(contents) = std::fs::read_to_string(root.join(".librarianisolate")) {
+                for line in contents.lines() {
+                    let f = line.trim().trim_end_matches('/').trim();
+                    if !f.is_empty() && !f.starts_with('#') {
+                        set.insert(f.to_string());
+                    }
+                }
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// Top-level directory component of a vault-relative path ("" if none).
+    pub fn top_folder(rel: &str) -> &str {
+        rel.split('/').next().unwrap_or("")
+    }
+
+    /// True if a link between two folders would cross an isolation boundary:
+    /// the folders differ and at least one of them is isolated.
+    pub fn crosses_isolation(&self, dir_a: &str, dir_b: &str) -> bool {
+        dir_a != dir_b
+            && (self.isolated_folders.iter().any(|f| f == dir_a)
+                || self.isolated_folders.iter().any(|f| f == dir_b))
     }
 
     pub fn resolve_path(&self, rel: &str) -> PathBuf {
@@ -175,11 +209,13 @@ impl LibraryServer {
         let mut result = content.to_string();
         let mut links_added = Vec::new();
 
+        let writing_dir = Self::top_folder(exclude_path);
         let mut candidates: Vec<_> = titles.iter()
             .filter(|(match_term, canonical, rel)| {
                 match_term.len() >= 3
                     && rel != exclude_path
                     && !self.link_stoplist.contains(&match_term.to_lowercase())
+                    && !self.crosses_isolation(writing_dir, Self::top_folder(rel))
                     && !existing_set.contains(canonical.as_str())
                     && !existing_set.contains(match_term.as_str())
             })
