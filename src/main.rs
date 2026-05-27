@@ -2,6 +2,7 @@ mod cache;
 mod eval;
 mod graph;
 mod index;
+mod optimize;
 mod report;
 mod search;
 mod server;

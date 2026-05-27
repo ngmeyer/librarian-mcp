@@ -63,6 +63,22 @@ pub struct EvalParams {
     pub queries: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OptimizeParams {
+    /// Refinement rounds (default 3). Each round re-detects communities.
+    pub iterations: Option<usize>,
+    /// Minimum community size to get a hub / be optimized (default 4).
+    pub min_community: Option<usize>,
+    /// Max intra-community links to add per note during densification (default 3).
+    pub max_links_per_note: Option<usize>,
+    /// Generate community hub MOCs (default true).
+    pub hubs: Option<bool>,
+    /// Add intra-community Related(auto) links in note bodies (default true).
+    pub densify: Option<bool>,
+    /// Write changes to the vault. Default false (dry-run: report projection only).
+    pub apply: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagsParams {
     /// Optional tag prefix filter
@@ -1190,6 +1206,139 @@ impl LibraryServer {
             ));
         }
         Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(description = "Autoresearch loop that optimizes the vault graph for retrieval (generic; works on any vault). Measures link relevancy (intra-community edge %) and traversal recall, then iteratively adds only intra-community edges via two graph-derived moves — community hub MOCs and same-community Related(auto) links — and re-measures the projected lift. Dry-run by default (reports projection + proposed actions); pass apply:true to write (backs up touched notes first).")]
+    async fn library_optimize(
+        &self,
+        params: Parameters<OptimizeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.check_and_refresh(self);
+        }
+        let iterations = params.0.iterations.unwrap_or(3);
+        let min_community = params.0.min_community.unwrap_or(4);
+        let max_links = params.0.max_links_per_note.unwrap_or(3);
+        let do_hubs = params.0.hubs.unwrap_or(true);
+        let do_densify = params.0.densify.unwrap_or(true);
+        let apply = params.0.apply.unwrap_or(false);
+
+        let (report, plan) = crate::optimize::optimize(
+            self, iterations, min_community, max_links, do_hubs, do_densify, apply,
+        );
+
+        let mut applied_note = String::new();
+        if apply {
+            let root = &self.library_paths[0];
+            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let backup = root.join(format!(".optimize-bak-{}", date));
+
+            // stem -> relative path for resolving densify targets.
+            let stem_to_rel: HashMap<String, String> = {
+                let c = self.cache.lock().unwrap();
+                let mut m = HashMap::new();
+                for (_t, canonical, rel) in &c.titles {
+                    m.entry(canonical.clone()).or_insert_with(|| rel.clone());
+                }
+                m
+            };
+
+            // Hubs: regenerate as standard MOC notes.
+            for (label, _) in &plan.hubs {
+                let note_path = root.join("Index").join(format!("{}.md", label));
+                if let Ok(existing) = std::fs::read_to_string(&note_path) {
+                    let bak = backup.join("Index").join(format!("{}.md", label));
+                    if let Some(p) = bak.parent() { let _ = std::fs::create_dir_all(p); }
+                    let _ = std::fs::write(bak, existing);
+                }
+                let (body, _, _) = crate::index::generate_index_body(self, label, "");
+                if std::fs::create_dir_all(note_path.parent().unwrap()).is_ok()
+                    && std::fs::write(&note_path, &body).is_ok()
+                {
+                    if let Ok(mut c) = self.cache.lock() {
+                        c.update_single_file(&note_path, &body, self);
+                    }
+                }
+            }
+
+            // Densify: upsert a managed Related(auto) block per note.
+            for (stem, peers) in &plan.densify {
+                let Some(rel) = stem_to_rel.get(stem) else { continue };
+                let path = root.join(rel);
+                let Ok(content) = std::fs::read_to_string(&path) else { continue };
+                let bak = backup.join(rel);
+                if let Some(p) = bak.parent() { let _ = std::fs::create_dir_all(p); }
+                let _ = std::fs::write(&bak, &content);
+                let updated = Self::upsert_related_block(&content, peers);
+                if std::fs::write(&path, &updated).is_ok() {
+                    if let Ok(mut c) = self.cache.lock() {
+                        c.update_single_file(&path, &updated, self);
+                    }
+                }
+            }
+            applied_note = format!(
+                "\nAPPLIED. Backed up touched notes to .optimize-bak-{}/\n",
+                date
+            );
+        }
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Graph optimizer ({} mode, {} iteration(s))\n\n\
+             Metric            before   after\n\
+             Intra-community   {:>5.0}%  {:>5.0}%   ({:+.0} pts, link relevancy)\n\
+             recall@2hops      {:>5.0}%  {:>5.0}%   ({:+.0} pts, retrieval)\n\
+             Orphans           {:>6}  {:>6}   ({:+})\n\
+             Edges             {:>6}  {:>6}\n\n\
+             Proposed: {} community hub(s), {} intra-community link(s).\n{}",
+            if apply { "APPLY" } else { "dry-run" },
+            report.iterations,
+            report.before.intra_pct, report.after.intra_pct,
+            report.after.intra_pct - report.before.intra_pct,
+            report.before.recall2 * 100.0, report.after.recall2 * 100.0,
+            (report.after.recall2 - report.before.recall2) * 100.0,
+            report.before.orphans, report.after.orphans,
+            report.after.orphans as i64 - report.before.orphans as i64,
+            report.before.edges, report.after.edges,
+            report.hubs.len(), report.links_added,
+            applied_note,
+        ));
+        if !report.hubs.is_empty() {
+            out.push_str("\nHubs:\n");
+            for (label, n) in report.hubs.iter().take(20) {
+                out.push_str(&format!("  [[{}]] — {} members\n", label, n));
+            }
+        }
+        if !report.link_examples.is_empty() {
+            out.push_str("\nExample links:\n");
+            for (a, b) in &report.link_examples {
+                out.push_str(&format!("  {} → {}\n", a, b));
+            }
+        }
+        if !apply {
+            out.push_str("\nRe-run with apply:true to write these changes.\n");
+        }
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// Insert or replace a managed `## Related (auto)` block of wikilinks.
+    fn upsert_related_block(content: &str, peers: &[String]) -> String {
+        const MARK: &str = "## Related (auto)";
+        let links = peers
+            .iter()
+            .map(|p| format!("- [[{}]]", p))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let block = format!("{}\n\n{}\n", MARK, links);
+        if let Some(pos) = content.find(MARK) {
+            let rest = &content[pos + MARK.len()..];
+            let end = rest.find("\n## ").map(|i| pos + MARK.len() + i + 1).unwrap_or(content.len());
+            format!("{}{}{}", &content[..pos], block, &content[end..])
+        } else {
+            let sep = if content.ends_with('\n') { "\n" } else { "\n\n" };
+            format!("{}{}{}", content, sep, block)
+        }
     }
 }
 
