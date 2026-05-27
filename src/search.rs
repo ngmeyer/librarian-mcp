@@ -66,42 +66,64 @@ impl SearchIndex {
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<(PathBuf, String, f64)> {
         let query_lower = query.to_lowercase();
-        let query_bytes = query_lower.as_bytes();
 
-        // Collect candidate indices that match the query string
-        let matched_indices: Vec<usize> = if query_bytes.len() < 3 {
-            self.files.iter()
-                .enumerate()
-                .filter(|(_, (_, content))| content.to_lowercase().contains(&query_lower))
-                .map(|(i, _)| i)
-                .collect()
-        } else {
-            let mut candidate_sets: Vec<&Vec<usize>> = Vec::new();
-            for window in query_bytes.windows(3) {
-                let tri = [window[0], window[1], window[2]];
+        // Candidate gather: term-based OR retrieval. A document is a candidate
+        // if it contains ANY query term (not the whole phrase verbatim), so
+        // conceptual multi-word queries retrieve instead of returning nothing.
+        // BM25 below ranks candidates by how many/how important the terms are.
+        let terms: Vec<String> = query_lower
+            .split_whitespace()
+            .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        // Per-term candidate docs: trigram-prefilter (terms >= 3 chars) then
+        // verify the term is actually a substring; linear scan for short terms.
+        let term_candidates = |term: &str| -> HashSet<usize> {
+            if term.len() < 3 {
+                return self
+                    .files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, c))| c.to_lowercase().contains(term))
+                    .map(|(i, _)| i)
+                    .collect();
+            }
+            let tb = term.as_bytes();
+            let mut acc: Option<HashSet<usize>> = None;
+            for w in tb.windows(3) {
+                let tri = [w[0], w[1], w[2]];
                 match self.trigrams.get(&tri) {
-                    Some(indices) => candidate_sets.push(indices),
-                    None => return Vec::new(),
+                    Some(idx) => {
+                        let s: HashSet<usize> = idx.iter().copied().collect();
+                        acc = Some(match acc {
+                            Some(p) => p.intersection(&s).copied().collect(),
+                            None => s,
+                        });
+                    }
+                    None => return HashSet::new(),
                 }
             }
-
-            if candidate_sets.is_empty() {
-                return Vec::new();
-            }
-
-            let mut candidates: HashSet<usize> = candidate_sets[0].iter().copied().collect();
-            for set in &candidate_sets[1..] {
-                let other: HashSet<usize> = set.iter().copied().collect();
-                candidates = candidates.intersection(&other).copied().collect();
-            }
-
-            candidates.into_iter()
-                .filter(|&i| {
-                    let (_, content) = &self.files[i];
-                    content.to_lowercase().contains(&query_lower)
-                })
+            acc.unwrap_or_default()
+                .into_iter()
+                .filter(|&i| self.files[i].1.to_lowercase().contains(term))
                 .collect()
         };
+
+        let mut candidate_set: HashSet<usize> = HashSet::new();
+        if terms.is_empty() {
+            // Fall back to whole-string substring for punctuation-only queries.
+            for (i, (_, content)) in self.files.iter().enumerate() {
+                if content.to_lowercase().contains(&query_lower) {
+                    candidate_set.insert(i);
+                }
+            }
+        } else {
+            for term in &terms {
+                candidate_set.extend(term_candidates(term));
+            }
+        }
+        let matched_indices: Vec<usize> = candidate_set.into_iter().collect();
 
         // BM25 scoring
         let k1: f64 = 1.2;
@@ -247,5 +269,30 @@ impl SearchIndex {
             let total: usize = self.doc_lengths.iter().sum();
             self.avg_doc_length = total as f64 / self.doc_lengths.len() as f64;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn idx() -> SearchIndex {
+        SearchIndex::build(&[
+            (PathBuf::from("a.md"), "VWAP mean reversion strategy for crypto".into()),
+            (PathBuf::from("b.md"), "regime gate using a Markov transition matrix".into()),
+            (PathBuf::from("c.md"), "gospel study notes on covenant and mercy".into()),
+        ])
+    }
+
+    // Term-based OR retrieval: a multi-word query whose words are scattered
+    // across docs (and never appear as one contiguous phrase) must still match.
+    #[test]
+    fn search_is_term_based_not_substring() {
+        let results = idx().search("VWAP regime reversion", 10);
+        let paths: Vec<_> = results.iter().map(|(p, _, _)| p.to_string_lossy().to_string()).collect();
+        assert!(paths.contains(&"a.md".to_string()), "doc with VWAP/reversion must match");
+        assert!(paths.contains(&"b.md".to_string()), "doc with regime must match (OR semantics)");
+        assert!(!paths.contains(&"c.md".to_string()), "unrelated doc must not match");
     }
 }
