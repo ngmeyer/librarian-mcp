@@ -1,6 +1,6 @@
 [package]
 name = "librarian-mcp"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Give Claude a librarian for your markdown vault"
 authors = ["Neal Meyer"]
