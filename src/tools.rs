@@ -146,6 +146,19 @@ pub struct ReportParams {
     pub output_path: Option<String>,
 }
 
+// A stem is orphan iff it has zero outgoing AND zero incoming edges in the
+// cached graph. Shared between `library_stats` and `library_graph_analysis`
+// so the two tools never disagree on what "orphan" means.
+fn is_orphan_stem(
+    stem: &str,
+    outgoing: &HashMap<String, Vec<String>>,
+    incoming: &HashMap<String, Vec<String>>,
+) -> bool {
+    let out = outgoing.get(stem).map_or(0, |v| v.len());
+    let inc = incoming.get(stem).map_or(0, |v| v.len());
+    out == 0 && inc == 0
+}
+
 // ── Tool implementations ──────────────────────────────────────────────
 
 impl LibraryServer {
@@ -473,27 +486,31 @@ impl LibraryServer {
         let files = self.all_md_files();
         let mut total_words = 0usize;
         let mut total_links = 0usize;
-        let mut all_link_targets = HashSet::new();
-        let mut all_file_stems = HashSet::new();
         let mut tag_count = HashSet::new();
 
         for path in &files {
-            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            all_file_stems.insert(stem);
-
             if let Ok(content) = std::fs::read_to_string(path) {
                 total_words += content.split_whitespace().count();
-                let links = Self::extract_wikilinks(&content);
-                total_links += links.len();
-                for link in links { all_link_targets.insert(link); }
+                total_links += Self::extract_wikilinks(&content).len();
                 for tag in Self::extract_tags(&content) { tag_count.insert(tag); }
             }
         }
 
+        // Orphans = files with no edges in either direction. Reads the cached
+        // graph so the count matches `library_graph_analysis`. The previous
+        // incoming-only check flagged any file that nothing linked TO as orphan
+        // — even if it had outgoing wikilinks — which contradicted the graph
+        // tool and surprised callers right after `library_write` auto-linked.
+        let (outgoing, incoming) = {
+            let mut cache = self.cache.lock().unwrap();
+            cache.check_and_refresh(self);
+            (cache.outgoing.clone(), cache.incoming.clone())
+        };
+
         let orphans: Vec<_> = files.iter()
             .filter(|p| {
                 let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                !all_link_targets.contains(&stem)
+                is_orphan_stem(&stem, &outgoing, &incoming)
             })
             .map(|p| self.relative_path(p))
             .collect();
@@ -793,11 +810,7 @@ impl LibraryServer {
 
         // Orphans
         let orphans: Vec<_> = all_nodes.iter()
-            .filter(|node| {
-                let out = outgoing.get(*node).map_or(0, |v| v.len());
-                let inc = incoming.get(*node).map_or(0, |v| v.len());
-                out == 0 && inc == 0
-            })
+            .filter(|node| is_orphan_stem(node, &outgoing, &incoming))
             .cloned()
             .collect();
 
@@ -1013,10 +1026,7 @@ impl LibraryServer {
             for v in vs { all_nodes.insert(v.clone()); }
         }
         let orphan_count = all_nodes.iter()
-            .filter(|n| {
-                outgoing.get(*n).map_or(0, |v| v.len()) == 0
-                    && incoming.get(*n).map_or(0, |v| v.len()) == 0
-            })
+            .filter(|n| is_orphan_stem(n, &outgoing, &incoming))
             .count();
 
         let vault_name = self.library_paths.first()
@@ -1426,6 +1436,34 @@ mod tests {
         assert!(!added.iter().any(|l| l == "Claude"), "stoplisted stem must not link");
         assert!(added.iter().any(|l| l == "QuantFlow"), "real topic must still link");
         assert!(out.contains("[[QuantFlow]]") && !out.contains("[[Claude]]"));
+    }
+
+    // Orphan check must count BOTH directions. Before the fix, `library_stats`
+    // flagged any stem with no incoming edges as orphan — so a freshly-written
+    // note whose auto-link wrapped [[Voltron]] (outgoing-only) was reported
+    // orphan, contradicting `library_graph_analysis`. Both tools now share
+    // `is_orphan_stem`, which is the canonical predicate.
+    #[test]
+    fn orphan_predicate_requires_zero_edges_in_both_directions() {
+        let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
+        let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
+
+        // "trading-note" has an outgoing wikilink to Voltron; nothing links to it.
+        outgoing.insert("trading-note".to_string(), vec!["Voltron".to_string()]);
+        incoming.insert("Voltron".to_string(), vec!["trading-note".to_string()]);
+
+        assert!(
+            !is_orphan_stem("trading-note", &outgoing, &incoming),
+            "outgoing-only file must not be flagged as orphan",
+        );
+        assert!(
+            !is_orphan_stem("Voltron", &outgoing, &incoming),
+            "incoming-only file must not be flagged as orphan",
+        );
+        assert!(
+            is_orphan_stem("disconnected", &outgoing, &incoming),
+            "stem absent from both maps is the only true orphan",
+        );
     }
 
     // Isolated folders never link across their boundary in either direction.
