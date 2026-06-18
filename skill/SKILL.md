@@ -29,6 +29,9 @@ Librarian MCP server must be configured and running. Verify by checking that `li
 /librarian analyze                 Full vault analysis: god nodes, communities, viz, report
 /librarian daydream [focus]        Discover non-obvious connections across vault notes
 /librarian status                  Vault health overview
+/librarian project init <name>     Initialize a project decision & state page
+/librarian project log <project>   Append an experiment-outcome entry to a project page
+/librarian propose <project>       Draft ranked, cited candidate next moves for a project
 ```
 
 If no command is given, show the usage summary above.
@@ -708,26 +711,361 @@ Approximately $0.40-0.50 per run (50 pairs) using Sonnet for synthesis and Haiku
 
 ---
 
+## projects
+
+**Purpose:** The `project init`, `project log`, and `propose` subcommands maintain a per-project **decision & state page** — an outcome-anchored experiment log that retains judgment so it stops being re-derived at the start of every session. This section documents the page convention the three subcommands operate on.
+
+### Page convention
+
+**Default location:** `Projects/<project>.md` in the vault. Operators may relocate; the `type: decision-state` frontmatter marker is the canonical signal — location is convention, not constraint.
+
+**Frontmatter schema:**
+
+```yaml
+---
+type: decision-state
+project: <project-name>
+anchor_outcome: <metric>          # string or list, e.g., "Sharpe" or ["CTR", "conversion"]
+research_scope:                    # at least one key; multiple allowed
+  folders: [<path>, ...]           # vault folders to draw research from
+  communities: [<label>, ...]      # Louvain community labels (see library_cluster)
+  tags: [<tag>, ...]               # notes carrying these tags
+  wikilinks: [<stem>, ...]         # explicit anchor notes (neighborhood expanded via library_traverse)
+repo: <optional path or url>
+status: active                     # active | archived
+---
+```
+
+**Section layout** (operators author all sections except the auto-managed candidate-next-moves block):
+
+```markdown
+# <Project>
+
+## Anchor outcomes
+<current value, target — operator authors and updates>
+
+## Experiment & outcome log
+<append-only entries. Each entry: dated bold header, then bullet sub-items for what changed, expected effect, observed delta on the anchor, link to source plan/PR/research>
+
+## Ratified decisions
+<append-only entries — decisions an experiment outcome confirmed or killed>
+
+## Candidate next moves (auto)
+<MANAGED BY THE AGENT — written by `/librarian propose`. Operators never edit this block by hand; re-running propose overwrites it. Everything outside this block is byte-stable across propose runs.>
+```
+
+### Operator contract (load-bearing)
+
+The whole loop depends on one habit: **logging the outcome delta when an experiment completes**. If deltas aren't logged, the page decays into a narrative log and the falsifiability advantage evaporates. `project log` exists specifically to make this cheap.
+
+### Example page (Voltron)
+
+```markdown
+---
+type: decision-state
+project: Voltron
+anchor_outcome: Sharpe
+research_scope:
+  communities: ["QuantFlow"]
+  tags: ["voltron", "trading"]
+repo: /Users/nealme/Projects/voltron
+status: active
+---
+
+# Voltron
+
+## Anchor outcomes
+- **Sharpe:** current 1.24 (last measured 2026-05-15) · target ≥ 1.50
+
+## Experiment & outcome log
+
+**2026-04-20 — Added regime-slope gate (slope ≥ 0.003)**
+- Expected: reduce chop-day false entries
+- Observed: Sharpe 1.18 → 1.24 over 30 trading days
+- Source: [[Voltron VWAP mean reversion achieves Sharpe 1.24 on 59-day backtest using 5K fixed bets and 3pct stops]]
+
+**2026-05-01 — Tightened stop from 3% → 2.5%**
+- Expected: reduce per-loss magnitude
+- Observed: Sharpe 1.24 → 1.21; reverted 2026-05-05
+- Source: backtest in repo
+
+## Ratified decisions
+- **Keep regime-slope gate** (ratified by 2026-04-20 experiment)
+- **Keep 3% stop** (kill experiment 2026-05-01: tighter stop reduced Sharpe)
+
+## Candidate next moves (auto)
+<!-- The /librarian propose subcommand writes this section. -->
+```
+
+### Generic by design
+
+No project name, anchor metric, folder path, or community label is baked into the subcommands themselves. Every vault-specific value comes from the operator's frontmatter. Substituting `SignUpSpark` + anchor `CTR` + scope `tags: ["gtm", "signupspark"]` works with no code change.
+
+---
+
+## project init
+
+**Purpose:** Scaffold a new project decision & state page in the vault, capturing the operator's declared anchor outcome(s) and research scope so future `project log` and `propose` runs have the structure they need. See the `projects` section above for the convention.
+
+### Behavior
+
+1. **Parse the argument:**
+   - Required: `<project-name>` — used as the file stem and the `project:` frontmatter value
+   - Optional: `--path <relpath>` to override the default location
+
+2. **Determine the page path:**
+   - Default: `Projects/<project-name>.md` (create `Projects/` if it doesn't exist)
+   - With `--path`, use the relative path as given
+
+3. **Refuse to overwrite an existing page:**
+   - Call `library_read` on the target path
+   - If the file exists, report: "A page already exists at `<path>`. Edit it directly, or pass a different `<project-name>` / `--path`." and stop. Do NOT silently overwrite.
+
+4. **Interactively gather frontmatter values from the operator:**
+   - **Anchor outcome(s):** ask for one or more metric names (Sharpe, CTR, conversion, retention, etc.). Capture as a string (single) or list (multiple).
+   - **Research scope:** ask which scope keys to populate. At least one of `folders`, `communities`, `tags`, `wikilinks` must be non-empty (an empty scope is a slip — re-prompt rather than write).
+     - `folders` — vault folder paths the project draws research from
+     - `communities` — Louvain community labels (run `library_cluster` if the operator wants to see candidates)
+     - `tags` — tag names
+     - `wikilinks` — explicit anchor notes
+   - **Optional `repo`:** path or URL to the project's source repo
+   - **Status:** default `active`
+
+5. **Compose the page:**
+
+   ```markdown
+   ---
+   type: decision-state
+   project: <name>
+   anchor_outcome: <value or list>
+   research_scope:
+     <populated keys>
+   repo: <value or omit>
+   status: active
+   ---
+
+   # <Project>
+
+   ## Anchor outcomes
+   <empty — operator fills current value and target>
+
+   ## Experiment & outcome log
+   <empty — append via /librarian project log>
+
+   ## Ratified decisions
+   <empty — operator authors directly or via project log ratification>
+   ```
+
+   Do **not** pre-create the `## Candidate next moves (auto)` block — `/librarian propose` writes it on first run.
+
+6. **Write the page** via `library_write` (auto-link is fine here — the project name will pick up backlinks naturally; isolation is honored automatically).
+
+7. **Report:**
+   ```
+   Initialized: Projects/<name>.md
+   Anchor outcome(s): <values>
+   Research scope: <summary>
+
+   Next steps:
+   - Fill in current value + target for the anchor outcome(s).
+   - Log past experiments via `/librarian project log <name>` to backfill history.
+   - Run `/librarian propose <name>` once history is seeded.
+   ```
+
+### Errors and edge cases
+
+- Page already exists → report and stop (R14: don't silently invent or overwrite)
+- Empty research scope → re-prompt (a project with no scope can't be proposed against meaningfully; better to ask again than write a useless page)
+- Project name with characters unsafe for filenames → sanitize (replace `/`, `:`, leading dots), echo the sanitized name back, ask for confirmation
+
+---
+
+## project log
+
+**Purpose:** Append a single experiment-outcome entry to a project's decision & state page. This is the load-bearing operator habit — every shipped experiment / change worth tracking against the anchor metric gets one log entry. The page accumulates a falsifiable record that compounds over time.
+
+### Behavior
+
+1. **Locate the project page:**
+   - Resolve `Projects/<project>.md` (or accept `--path <relpath>`)
+   - Call `library_read`; if the file doesn't exist, report: "No project page at `<path>`. Run `/librarian project init <project>` first." and stop.
+
+2. **Validate structure:**
+   - Confirm frontmatter parses (use `library_metadata` or parse inline) and `type: decision-state` is present
+   - Confirm the page has an `## Experiment & outcome log` section
+   - If structure is missing, report the missing piece and point at `project init` — do NOT silently invent sections (R14: degrade gracefully, don't invent)
+
+3. **Interactively gather the entry fields:**
+   - **What changed** — short description (one line; the entry header)
+   - **Expected effect** — what the operator predicted before the change
+   - **Observed delta** — the actual movement on the anchor metric (operator brings this from the source-of-truth: backtest, A/B platform, analytics, spreadsheet)
+   - **Source link** — link to the plan, PR, research note, or document that motivated the change. Wikilinks (`[[note]]`) preferred for vault-internal sources
+   - **Ratifies / kills a decision?** Optional — if the outcome confirms or rejects a prior call, ask for the decision text so it also lands in `## Ratified decisions`
+
+4. **Compose the log entry:**
+
+   ```markdown
+   **YYYY-MM-DD — <what changed>**
+   - Expected: <expected effect>
+   - Observed: <delta on anchor>
+   - Source: <link or wikilink>
+   ```
+
+5. **Append to the log section:**
+   - Read the current page content
+   - Locate the `## Experiment & outcome log` header
+   - Identify the section's end (the next `\n## ` heading, or end of file)
+   - Append the new entry at the end of the section (after existing entries, before the next H2)
+   - Preserve existing entries byte-identical — append-only, never rewrite
+
+6. **If the entry ratifies/kills a decision:**
+   - Compose a matching one-line entry: `- **<decision>** — ratified by <date> entry: <link>` (or `killed by` for negative outcomes)
+   - Append to the `## Ratified decisions` section the same way (locate header → insert at end → preserve prior entries)
+
+7. **Write the updated page** via `library_write`. The `## Candidate next moves (auto)` block, if present, must remain byte-identical — only the log (and possibly Ratified decisions) sections change.
+
+8. **Report:**
+   ```
+   Logged to Projects/<project>.md
+   Entry: <date> — <what changed>
+   Anchor delta: <observed>
+   Ratified: <decision or "none">
+   ```
+
+### Errors and edge cases
+
+- Page missing → report and point at `project init`
+- `## Experiment & outcome log` section missing → report and stop; suggest re-running `project init` or adding the section manually
+- Observed delta is empty → prompt again; the load-bearing value of the log is the delta. If the operator genuinely doesn't have a measurement yet (still running), record the entry with `Observed: pending` and remind them to update it
+- The `## Candidate next moves (auto)` block exists → verify it remains byte-identical after the write (sanity check; should hold because the log section is independent)
+
+---
+
+## propose
+
+**Purpose:** Draft a ranked, evidence-cited list of candidate next moves for a project, written into a fenced managed block (`## Candidate next moves (auto)`) on the project's decision & state page. This is the **steering** half of the Judgment layer: the operator brings the anchor and the scope; the agent reads accumulated research + outcome history and proposes what to try next, grounded in citations rather than instinct.
+
+The subcommand runs on demand. There is no daemon and no automatic refresh — the operator invokes propose at a steering moment, reviews the candidates, picks one (or none), and the loop closes when they log the next outcome.
+
+### Behavior
+
+1. **Parse the argument:**
+   - Required: `<project>` — resolves to `Projects/<project>.md` (or accept `--path <relpath>`)
+   - Optional: `--count N` for number of candidates (default 5; clamp to 3–10)
+
+2. **Read the project page:**
+   - `library_read` the path; report a clear error and stop if missing
+   - Parse frontmatter (`library_metadata` is convenient). Required fields: `anchor_outcome`, `research_scope`. If either is missing or `research_scope` has no populated keys, report what's missing and point at `project init`. Do NOT proceed with an empty scope (R14: degrade gracefully but don't fabricate)
+   - Also parse the page body to extract:
+     - Prior `## Experiment & outcome log` entries (informs ranking — what has and hasn't moved the metric)
+     - Prior `## Ratified decisions` (avoid re-proposing what's already decided)
+
+3. **Compose the research corpus** from declared scope. Use existing librarian primitives — no new tools required:
+   - For each `folders` entry: `library_list` then `library_read` per `.md` file under that folder
+   - For each `communities` entry: `library_cluster` returns community membership; gather all member stems whose community label matches, then `library_read` each. (Note: `library_cluster` returns stems; resolve to relative paths via `library_metadata` or by querying the cache via `library_links` if needed.)
+   - For each `tags` entry: `library_tags` returns notes carrying the tag; `library_read` each
+   - For each `wikilinks` entry: `library_traverse` depth 1 from the named stem; `library_read` neighbors
+   - Union the results, dedupe by relative path
+   - **Cap aggressive corpora at ~80 notes total.** If the union exceeds that, prefer notes more recent (modification time via `library_changes` if available, otherwise the cache's mtime), and notes the operator's prior log entries already reference. Note the cap in the output so the operator knows the corpus was truncated.
+
+4. **Apply the isolation filter:**
+   - Read `.librarianisolate` at the vault root (one folder name per line, comments and blanks ignored)
+   - For each candidate corpus note, derive its top-level folder (the first path component). If that folder appears in `.librarianisolate`, drop the note from the corpus. This honors `.librarianisolate` end-to-end: the agent never cites a note from an isolated folder.
+   - If after isolation the corpus is empty, report "scope produced no citable notes after isolation filter" and stop (do not write an empty managed block).
+
+5. **Read the corpus content and rank candidate next moves:**
+   - For each candidate, draw on:
+     - **Prior outcome history on this project** (what has moved the anchor, what hasn't; what's already been tried and killed)
+     - **Research evidence strength** (multiple sources agreeing, recency, methodological rigor noted in the source, whether the source is itself a synthesis/digest or a raw thread)
+     - **Confidence level** — explicit `high | medium | low` based on the above
+   - Generate `<count>` candidates (default 5). Each candidate carries:
+     - **A concrete proposed move** (action, not aspiration — "Add a Markov persistence gate at τ=0.85" not "Improve regime detection")
+     - **Expected effect on the anchor** (qualitative or quantitative; reference the metric by name from frontmatter)
+     - **Confidence:** `high | medium | low`
+     - **Citations** — at least one, ideally 2–3, as wikilinks (`[[note title]]`) or relative paths to specific corpus notes that motivated the candidate
+     - **Rationale** — one or two sentences tying the citations to the proposed move
+   - Rank candidates with the highest expected-impact / highest-confidence first. Break ties with confidence, then recency of supporting evidence.
+
+6. **Construct the managed-block content:**
+
+   ```markdown
+   ## Candidate next moves (auto)
+
+   _Generated YYYY-MM-DD by `/librarian propose`. Corpus: N notes scoped from <summary>. Re-running this command overwrites only this section._
+
+   ### 1. <Proposed move> · confidence: <level>
+
+   **Expected:** <effect on anchor>
+
+   **Why:** <rationale tying citations to the move>
+
+   **Citations:** [[note A]], [[note B]], [[note C]]
+
+   ### 2. <Proposed move> · confidence: <level>
+
+   ...
+   ```
+
+7. **Upsert the block into the page** (mirrors the `## Related (auto)` upsert pattern from v0.1.2's `library_optimize`):
+   - Read the current page content
+   - Search for the marker `## Candidate next moves (auto)`
+     - **If found:** replace from the marker through the start of the next `\n## ` heading (or end of file). Everything before and after the block is byte-identical.
+     - **If not found:** append the block to the end of the page (preceded by a blank line and `---` separator if the prior section doesn't end with one).
+   - Write the updated page via `library_write`
+
+8. **Report a short summary:**
+   ```
+   Wrote N candidates to Projects/<project>.md
+   Corpus: <count> notes (after isolation filter)
+   Top candidate: <name> · confidence: <level>
+   ```
+
+### Sparse-history fallback (R14)
+
+If the page has no prior `## Experiment & outcome log` entries:
+- Proceed using research evidence alone
+- Cap confidence at `medium` for every candidate (no project-specific outcome history exists to grant `high` confidence)
+- Note this in the managed block's header line: `_No prior outcome history — candidates drawn from research evidence only._`
+
+### Errors and edge cases
+
+- Page missing → report and point at `project init`
+- Frontmatter missing required fields → report which fields are missing
+- Empty research scope after parsing → point at `project init` to fill the scope
+- Empty corpus after isolation → report and stop without writing
+- Operator prose accidentally inside the managed-block range (e.g., a prior manual edit) → the upsert preserves only the boundary markers; warn the operator that hand-edits inside the block are overwritten. The block is agent-owned by contract.
+
+### Loop closure
+
+After the operator reviews the block and chooses a move:
+1. They make the change in the project (outside this skill's scope — the work lives in the repo).
+2. When the outcome is measurable, they run `/librarian project log <project>` to record the delta.
+3. On the next `/librarian propose <project>` run, the new log entry is read in step 2 and informs the next ranking.
+
+That closes the loop: candidate → action → outcome → updated history → better next candidate.
+
+---
+
 ## Tool Reference
 
 This skill orchestrates these Librarian MCP tools:
 
 | Tool | Used by |
 |------|---------|
-| `library_search` | search, daydream (focus mode) |
-| `library_read` | search, ingest, connect, daydream |
-| `library_write` | ingest, from *, connect, daydream |
-| `library_list` | ingest (scan docs/solutions/), import (batch), daydream |
+| `library_search` | search, daydream (focus mode), propose (when tag/keyword scoping) |
+| `library_read` | search, ingest, connect, daydream, project log, propose |
+| `library_write` | ingest, from *, connect, daydream, project init, project log, propose |
+| `library_list` | ingest (scan docs/solutions/), import (batch), daydream, propose (folder scope) |
 | `library_links` | graph |
-| `library_tags` | search |
-| `library_metadata` | ingest (read frontmatter) |
+| `library_tags` | search, propose (tag scope) |
+| `library_metadata` | ingest (read frontmatter), project init, project log, propose |
 | `library_daily` | daily |
 | `library_stats` | status, graph |
 | `library_suggest_links` | ingest, connect |
-| `library_traverse` | search, graph |
+| `library_traverse` | search, graph, propose (wikilink scope) |
 | `library_shortest_path` | graph (on request) |
 | `library_graph_analysis` | graph (vault-wide) |
-| `library_cluster` | analyze, graph |
+| `library_cluster` | analyze, graph, propose (community scope) |
 | `library_visualize` | analyze |
 | `library_report` | analyze |
 | `library_import` | import (MarkItDown conversion) |
