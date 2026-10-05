@@ -146,6 +146,20 @@ pub struct ReportParams {
     pub output_path: Option<String>,
 }
 
+/// Up to 30 bytes of context either side of the match at `start..end`,
+/// widened to character boundaries so multi-byte text can't split a character.
+fn snippet_around(content: &str, start: usize, end: usize) -> String {
+    let mut from = start.saturating_sub(30);
+    while !content.is_char_boundary(from) {
+        from -= 1;
+    }
+    let mut to = (end + 30).min(content.len());
+    while !content.is_char_boundary(to) {
+        to += 1;
+    }
+    content[from..to].replace('\n', " ")
+}
+
 // A stem is orphan iff it has zero outgoing AND zero incoming edges in the
 // cached graph. Shared between `library_stats` and `library_graph_analysis`
 // so the two tools never disagree on what "orphan" means.
@@ -273,20 +287,7 @@ impl LibraryServer {
                                     continue;
                                 }
                                 if let Some(m) = re.find(content) {
-                                    let start = m.start().saturating_sub(30);
-                                    let end = (m.end() + 30).min(content.len());
-                                    // Clamp to char boundaries
-                                    let start = content[..start]
-                                        .char_indices()
-                                        .last()
-                                        .map(|(i, _)| i)
-                                        .unwrap_or(0);
-                                    let end = content[end..]
-                                        .char_indices()
-                                        .next()
-                                        .map(|(i, _)| i + end)
-                                        .unwrap_or(content.len());
-                                    let snippet = content[start..end].replace('\n', " ");
+                                    let snippet = snippet_around(content, m.start(), m.end());
                                     let rel = self.relative_path(path);
                                     suggestions.push((rel, format!("...{}...", snippet.trim())));
                                     if suggestions.len() >= 5 {
@@ -1464,6 +1465,22 @@ mod tests {
             is_orphan_stem("disconnected", &outgoing, &incoming),
             "stem absent from both maps is the only true orphan",
         );
+    }
+
+    // The context window around a match used to be cut at a raw byte offset,
+    // which panicked when that offset fell inside a multi-byte character.
+    #[test]
+    fn snippet_does_not_split_multibyte_characters() {
+        let content = format!("{} Foo {}", "é".repeat(15), "日本語".repeat(10));
+        let start = content.find("Foo").unwrap();
+        let snippet = snippet_around(&content, start, start + 3);
+        assert!(snippet.contains("Foo"));
+
+        // Every possible match position in multi-byte text must be safe.
+        let text = "éあ𝄞x".repeat(20);
+        for (i, _) in text.char_indices() {
+            snippet_around(&text, i, (i + 1).min(text.len()));
+        }
     }
 
     // Isolated folders never link across their boundary in either direction.
