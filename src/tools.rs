@@ -221,7 +221,7 @@ impl LibraryServer {
         }
     }
 
-    #[tool(description = "Write or create a file in the library. Auto-links mentions of existing notes as [[wikilinks]] using canonical file names for Obsidian graph compatibility. Creates parent directories if needed.")]
+    #[tool(description = "Write or create a file in the library. Auto-links mentions of existing notes as [[wikilinks]] using canonical file names for Obsidian graph compatibility, unless auto-linking is disabled on the server. Creates parent directories if needed.")]
     async fn library_write(
         &self,
         params: Parameters<WriteParams>,
@@ -234,7 +234,7 @@ impl LibraryServer {
             let cache = self.cache.lock().unwrap();
             cache.titles.clone()
         };
-        let (linked_content, links_added) = self.auto_link_content(&params.0.content, &params.0.path, &titles);
+        let (linked_content, links_added) = self.maybe_auto_link(&params.0.content, &params.0.path, &titles);
         match std::fs::write(&full, &linked_content) {
             Ok(_) => {
                 if let Ok(mut cache) = self.cache.lock() {
@@ -891,7 +891,7 @@ impl LibraryServer {
             let cache = self.cache.lock().unwrap();
             cache.titles.clone()
         };
-        let (linked_content, links_added) = self.auto_link_content(&content, lib_path, &titles);
+        let (linked_content, links_added) = self.maybe_auto_link(&content, lib_path, &titles);
         let full_path = self.resolve_path(lib_path);
         if let Some(parent) = full_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1406,6 +1406,7 @@ mod tests {
             default_ignores: vec![],
             link_stoplist: vec![],
             isolated_folders: vec![],
+            auto_link: true,
             cache: Arc::new(Mutex::new(VaultCache::default())),
             tool_router: LibraryServer::new_tool_router(),
         };
@@ -1424,6 +1425,7 @@ mod tests {
             default_ignores: vec![],
             link_stoplist: vec!["claude".to_string()],
             isolated_folders: vec![],
+            auto_link: true,
             cache: Arc::new(Mutex::new(VaultCache::default())),
             tool_router: LibraryServer::new_tool_router(),
         };
@@ -1474,6 +1476,7 @@ mod tests {
             default_ignores: vec![],
             link_stoplist: vec![],
             isolated_folders: vec!["Threshold".to_string()],
+            auto_link: true,
             cache: Arc::new(Mutex::new(VaultCache::default())),
             tool_router: LibraryServer::new_tool_router(),
         };
@@ -1489,5 +1492,72 @@ mod tests {
         );
         assert!(!added.iter().any(|l| l == "POV Tracker"), "must not cross into isolated folder");
         assert!(added.iter().any(|l| l == "QuantFlow"), "non-isolated link still allowed");
+    }
+
+    fn test_server(auto_link: bool) -> LibraryServer {
+        LibraryServer {
+            library_paths: vec![],
+            default_ignores: vec![],
+            link_stoplist: vec![],
+            isolated_folders: vec![],
+            auto_link,
+            cache: Arc::new(Mutex::new(VaultCache::default())),
+            tool_router: LibraryServer::new_tool_router(),
+        }
+    }
+
+    #[test]
+    fn auto_link_can_be_disabled_for_writes_only() {
+        let s = test_server(false);
+        let titles = vec![(
+            "QuantFlow".to_string(),
+            "QuantFlow".to_string(),
+            "Index/QuantFlow.md".to_string(),
+        )];
+        let text = "See QuantFlow tuning.";
+        let (out, added) = s.maybe_auto_link(text, "notes/a.md", &titles);
+        assert_eq!((out.as_str(), added.len()), (text, 0));
+        let (_, suggestions) = s.auto_link_content(text, "notes/a.md", &titles);
+        assert_eq!(suggestions, vec!["QuantFlow"]);
+    }
+
+    #[test]
+    fn auto_link_switch_parsing() {
+        assert!(LibraryServer::auto_link_enabled(false, None));
+        assert!(LibraryServer::auto_link_enabled(false, Some("")));
+        assert!(LibraryServer::auto_link_enabled(false, Some("on")));
+        for off in ["off", "OFF", " off ", "0", "false", "No"] {
+            assert!(!LibraryServer::auto_link_enabled(false, Some(off)), "{:?}", off);
+        }
+        // The flag only turns linking off; it can't be overridden by the variable.
+        assert!(!LibraryServer::auto_link_enabled(true, None));
+        assert!(!LibraryServer::auto_link_enabled(true, Some("on")));
+    }
+
+    // The tool itself, not just the wrapper, must honor the switch.
+    #[tokio::test]
+    async fn library_write_honors_the_auto_link_switch() {
+        let dir = std::env::temp_dir()
+            .join(format!("librarian-test-autolink-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Index")).unwrap();
+        std::fs::write(dir.join("Index/QuantFlow.md"), "# QuantFlow").unwrap();
+
+        for (auto_link, expected) in [
+            (false, "See QuantFlow tuning."),
+            (true, "See [[QuantFlow]] tuning."),
+        ] {
+            let mut server = test_server(auto_link);
+            server.library_paths = vec![dir.clone()];
+            *server.cache.lock().unwrap() = VaultCache::build_full(&server);
+            let params = Parameters(WriteParams {
+                path: "notes/a.md".to_string(),
+                content: "See QuantFlow tuning.".to_string(),
+            });
+            server.library_write(params).await.unwrap();
+            assert_eq!(std::fs::read_to_string(dir.join("notes/a.md")).unwrap(), expected);
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
