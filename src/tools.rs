@@ -1490,4 +1490,54 @@ mod tests {
         assert!(!added.iter().any(|l| l == "POV Tracker"), "must not cross into isolated folder");
         assert!(added.iter().any(|l| l == "QuantFlow"), "non-isolated link still allowed");
     }
+
+    fn bare_server() -> LibraryServer {
+        LibraryServer {
+            library_paths: vec![],
+            default_ignores: vec![],
+            link_stoplist: vec![],
+            isolated_folders: vec![],
+            cache: Arc::new(Mutex::new(VaultCache::default())),
+            tool_router: LibraryServer::new_tool_router(),
+        }
+    }
+
+    fn quantflow_titles() -> Vec<(String, String, String)> {
+        vec![(
+            "QuantFlow".to_string(),
+            "QuantFlow".to_string(),
+            "Index/QuantFlow.md".to_string(),
+        )]
+    }
+
+    // A mention inside an existing markdown link, its target or an image must
+    // not be wrapped again.
+    #[test]
+    fn auto_link_skips_mentions_inside_markdown_links() {
+        let server = bare_server();
+        let titles = quantflow_titles();
+        for text in [
+            "[all about QuantFlow](https://example.com/x)",
+            "[notes](QuantFlow.md)",
+            "![QuantFlow diagram](img/QuantFlow.png)",
+            "[a [QuantFlow] c](x.md)",
+            "[x](Notes/Foo_(1).QuantFlow.md)",
+            "[t](u \"QuantFlow title\")",
+        ] {
+            let (out, added) = server.auto_link_content(text, "notes/a.md", &titles);
+            assert_eq!((out.as_str(), added.len()), (text, 0), "{}", text);
+        }
+    }
+
+    // The link pattern must not run across lines: a stray `[` earlier in the
+    // note can't hide a later plain mention.
+    #[test]
+    fn auto_link_is_not_suppressed_by_an_unclosed_bracket() {
+        let server = bare_server();
+        let text = "Draft [v2\n\nQuantFlow is covered here.\n\nSee [docs](docs.md)";
+        let (out, added) = server.auto_link_content(text, "notes/a.md", &quantflow_titles());
+        assert_eq!(added, vec!["QuantFlow"]);
+        assert!(out.contains("[[QuantFlow]] is covered here."), "{}", out);
+    }
+
 }

@@ -170,7 +170,8 @@ impl LibraryServer {
     }
 
     /// Return byte ranges within `text` that should be excluded from auto-linking.
-    /// Covers fenced code blocks, inline code, URLs, and existing wikilinks.
+    /// Covers fenced code blocks, inline code, URLs, existing wikilinks, and
+    /// existing markdown links and images.
     fn find_exclusion_zones(text: &str) -> Vec<(usize, usize)> {
         let mut zones = Vec::new();
 
@@ -195,6 +196,17 @@ impl LibraryServer {
         // Existing wikilinks: [[...]]
         let wikilinks = regex::Regex::new(r"\[\[[^\]]+\]\]").unwrap();
         for m in wikilinks.find_iter(text) {
+            zones.push((m.start(), m.end()));
+        }
+
+        // Existing markdown links and images: [text](target). Text and target
+        // may nest one level of brackets / parentheses and stay on one line,
+        // so a stray `[` can't swallow the rest of the note.
+        let md_links = regex::Regex::new(
+            r"!?\[(?:[^\[\]\n]|\[[^\[\]\n]*\])*\]\((?:[^()\n]|\([^()\n]*\))*\)",
+        )
+        .unwrap();
+        for m in md_links.find_iter(text) {
             zones.push((m.start(), m.end()));
         }
 

@@ -167,7 +167,7 @@ When Claude writes files via `library_write`, Librarian scans for mentions of ex
 
 Links use canonical file names so they resolve correctly in Obsidian's graph view, even on case-sensitive filesystems. Frontmatter aliases are supported: if a note has `aliases: [ML, machine learning]`, mentions will auto-link using `[[Note Name|ML]]` format.
 
-Auto-linking skips code blocks, inline code, URLs, and existing wikilinks to avoid corrupting content.
+Auto-linking skips code blocks, inline code, URLs, and existing wikilinks and markdown links (`[text](target)`) to avoid corrupting content.
 
 ### Knowledge graph traversal
 
